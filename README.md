@@ -1,35 +1,80 @@
 # hermes-kiro
 
-Native Kiro model-provider plugin for Hermes. It talks directly to Kiro over HTTPS: no `kiro-cli`, no loopback proxy, no gateway.
+Native Kiro model-provider plugin for Hermes. It connects Hermes directly to Kiro over HTTPS: no local HTTP listener, proxy, daemon, or `kiro-cli` is required.
 
-## v0.1 scope
+## Why native HTTPS
 
-- AWS Builder ID device authorization by default; optionally accepts an IAM Identity Center `start URL`.
-- Hermes-owned credentials in `$HERMES_HOME/kiro/credentials.json` (mode `0600`).
-- Automatic single-flight refresh-token rotation and a process-wide HTTP connection pool for concurrent Hermes conversations.
-- Direct Kiro event-stream transport, dynamic model catalog, system/user translation, and tool-result turns.
-- `hermes kiro usage` / `/kiro usage`; `hermes kiro logout` removes only this plugin's local credentials.
-- Social login is deliberately out of scope.
+- **Direct transport:** Hermes streams Kiro responses over one shared HTTPS connection pool, including concurrent conversations.
+- **No local service:** nothing listens on a loopback port, no helper binary is downloaded, and no daemon has to be supervised.
+- **Native Kiro auth:** AWS Builder ID or IAM Identity Center device authorization stores only the Kiro OIDC registration and tokens under `$HERMES_HOME/kiro/credentials.json` (directory `0700`, file `0600`). Tokens refresh automatically.
+- **Kiro-aware runtime:** live model catalog, Kiro event-stream framing, tool calls/results, and Kiro usage limits are handled by the provider client.
 
-## Install locally
+## Architecture
+
+```mermaid
+flowchart LR
+    U[User] --> C[commands plugin\nhermes kiro login / logout / usage]
+    C --> S[$HERMES_HOME/kiro/credentials.json]
+    H[Hermes CLI / Gateway] --> P[kiro-provider\ncustom Hermes client]
+    P --> S
+    P --> T[Shared HTTPS pool]
+    T --> K[Kiro HTTPS APIs\nstream · models · usage]
+```
+
+## Why two plugins
+
+Hermes discovers model providers and command plugins through separate native extension paths:
+
+- **`provider/`** is `kind: model-provider`. It registers Kiro for `/model`, the model picker, CLI, gateway, and auxiliary calls.
+- **`commands/`** is `kind: standalone`. It owns the interactive terminal login and the `hermes kiro` / `/kiro` command surfaces.
+
+They share one credential store and one provider; the split exists only because a model-provider plugin is deliberately not loaded by Hermes' command-plugin manager.
+
+## Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/anpicasso/hermes-kiro/main/install.sh | bash
+```
+
+The installer installs both plugin directories and enables the command plugin. It **does not restart anything**.
+
+- A new terminal can immediately run `hermes kiro login`.
+- Restart an already-running Hermes gateway once so it imports the newly installed provider:
+
+```bash
+systemctl --user restart hermes-gateway
+```
+
+Then authenticate:
+
+```bash
+hermes kiro login
+```
+
+Choose AWS Builder ID or corporate IAM Identity Center with the arrow keys. Flags remain available for automation:
+
+```bash
+hermes kiro login --start-url 'https://YOUR-START-URL.awsapps.com/start' --region us-east-1
+hermes kiro usage
+hermes kiro logout
+```
+
+## Manual install
 
 ```bash
 hermes plugins install anpicasso/hermes-kiro/commands --no-enable
 hermes plugins install anpicasso/hermes-kiro/provider --no-enable
 hermes plugins enable kiro
-hermes kiro login                         # asks Builder ID vs corporate IdC, then inputs
-hermes kiro login --start-url 'https://YOUR-START-URL.awsapps.com/start' --region us-east-1  # corporate IdC
-hermes kiro usage                         # current Kiro allowances
-hermes kiro logout                        # removes only ~/.hermes/kiro credentials
-# New CLI processes see login immediately; restart only an already-running Hermes gateway.
 ```
 
-The login command stores only Kiro's IdC registration and tokens. It adds `KIRO_AUTH=kiro-oauth-local` to Hermes' `.env`; that is a sentinel for Hermes' provider registry, not a credential.
+`logout` removes only this plugin's local credentials. It does not invent a remote revoke endpoint.
 
 ## Development
 
 ```bash
 PYTHONPATH=provider ~/.hermes/hermes-agent/venv/bin/python -m pytest tests -q
+hermes plugins doctor commands --ci
+hermes plugins doctor provider --ci
 ```
 
 Kiro is an undocumented private API. Use your own entitlement; never commit credentials.
