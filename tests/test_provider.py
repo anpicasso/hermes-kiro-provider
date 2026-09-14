@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import sys
 import asyncio
+import struct
 import time
+import zlib
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -72,10 +74,17 @@ def test_empty_success_stream_is_an_error(monkeypatch):
         list(instance.chat.completions.create(model="claude-sonnet-4.5", messages=[{"role": "user", "content": "hi"}], stream=True))
 
 
-def test_event_decoder_stops_cleanly_when_buffer_is_drained(monkeypatch):
+def test_event_decoder_handles_a_frame_split_mid_prelude(monkeypatch):
     class Response:
         def __init__(self):
-            self.reads = iter([b"frame", b""])
+            payload = json.dumps({"content": "OK"}).encode()
+            event_type = b"assistantResponseEvent"
+            headers = b"\x0b:event-type\x07" + struct.pack(">H", len(event_type)) + event_type
+            prelude = struct.pack(">II", 16 + len(headers) + len(payload), len(headers))
+            prelude += struct.pack(">I", zlib.crc32(prelude) & 0xFFFFFFFF)
+            frame = prelude + headers + payload
+            frame += struct.pack(">I", zlib.crc32(frame) & 0xFFFFFFFF)
+            self.reads = iter([frame[:5], frame[5:], b""])
 
         def read(self, _):
             return next(self.reads)
@@ -86,17 +95,9 @@ def test_event_decoder_stops_cleanly_when_buffer_is_drained(monkeypatch):
         def __exit__(self, *_):
             return None
 
-    class Buffer:
-        def add_data(self, _):
-            return None
-
-        def next(self):
-            raise StopIteration
-
     instance = client.KiroClient()
     monkeypatch.setattr(instance, "_open", lambda *_, **__: Response())
-    monkeypatch.setattr(client, "EventStreamBuffer", Buffer)
-    assert list(instance._events({})) == []
+    assert list(instance._events({})) == [("assistantResponseEvent", {"content": "OK"})]
 
 
 def test_builder_id_request_omits_profile_arn(monkeypatch):
