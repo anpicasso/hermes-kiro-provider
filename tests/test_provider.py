@@ -9,11 +9,12 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parents[1] / "provider"))
 
 import client
-from credentials import KiroAuthError, runtime_region, validate_start_url
+from credentials import BUILDER_ID_START_URL, KiroAuthError, runtime_region, validate_start_url
 from translate import build_request
 
 
 def test_start_url_is_strict_and_region_maps():
+    assert validate_start_url(BUILDER_ID_START_URL) == BUILDER_ID_START_URL
     assert validate_start_url("https://d-abc.awsapps.com/start/") == "https://d-abc.awsapps.com/start"
     assert runtime_region("eu-west-1") == "eu-central-1"
     with pytest.raises(KiroAuthError):

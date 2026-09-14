@@ -25,7 +25,7 @@ def _credentials():
 def setup_kiro_parser(parser) -> None:
     sub = parser.add_subparsers(dest="kiro_command", required=True)
     login_parser = sub.add_parser("login", help="Sign in to Kiro via IAM Identity Center")
-    login_parser.add_argument("--start-url", required=True)
+    login_parser.add_argument("--start-url", default="https://view.awsapps.com/start", help="IAM Identity Center URL; defaults to AWS Builder ID")
     login_parser.add_argument("--region", default="us-east-1")
     sub.add_parser("status", help="Show Kiro login status")
 
@@ -51,7 +51,7 @@ def handle_kiro_slash(raw_args: str) -> str:
             return f"Kiro logged in; IdC region={creds.region}; expires in {int(creds.expires_at - time.time())}s."
         except Exception as exc:
             return f"Kiro is not logged in: {exc}"
-    return "Use `hermes kiro login --start-url https://YOUR.awsapps.com/start --region us-east-1` in a terminal. Device authorization needs that terminal to stay open; `/kiro status` works here."
+    return "Use `hermes kiro login` for AWS Builder ID, or add `--start-url https://YOUR.awsapps.com/start` for IAM Identity Center. Device authorization needs that terminal to stay open; `/kiro status` works here."
 
 
 def register(ctx) -> None:

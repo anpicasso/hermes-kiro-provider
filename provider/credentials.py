@@ -22,6 +22,7 @@ _REGION_MAP = {
 }
 _SCOPES = ["codewhisperer:completions", "codewhisperer:analysis", "codewhisperer:conversations"]
 _GRANTS = ["urn:ietf:params:oauth:grant-type:device_code", "refresh_token"]
+BUILDER_ID_START_URL = "https://view.awsapps.com/start"
 _LOCK = Lock()
 _CACHED: "Credentials | None" = None
 
@@ -133,7 +134,7 @@ def _enable_provider() -> None:
             handle.write(line + "\n")
 
 
-def login(start_url: str, region: str) -> tuple[str, str]:
+def login(start_url: str = BUILDER_ID_START_URL, region: str = "us-east-1") -> tuple[str, str]:
     """Run an IdC device-code login; returns the verification URL and user code."""
     global _CACHED
     start_url = validate_start_url(start_url)
@@ -195,7 +196,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Hermes-native Kiro IdC login")
     sub = parser.add_subparsers(dest="command", required=True)
     command = sub.add_parser("login")
-    command.add_argument("--start-url", required=True)
+    command.add_argument("--start-url", default=BUILDER_ID_START_URL, help="IAM Identity Center URL; defaults to AWS Builder ID")
     command.add_argument("--region", default="us-east-1")
     sub.add_parser("status")
     args = parser.parse_args()
