@@ -16,7 +16,7 @@ mkdir -p ~/.hermes/plugins
 cp -R commands ~/.hermes/plugins/kiro
 cp -R provider ~/.hermes/plugins/kiro-provider
 hermes plugins enable kiro
-hermes kiro login                         # AWS Builder ID
+hermes kiro login                         # asks Builder ID vs corporate IdC, then inputs
 hermes kiro login --start-url 'https://YOUR-START-URL.awsapps.com/start' --region us-east-1  # corporate IdC
 # Restart Hermes, then choose provider `kiro`.
 ```

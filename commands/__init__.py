@@ -18,22 +18,22 @@ def _credentials():
     directory = _provider_dir()
     if str(directory) not in sys.path:
         sys.path.insert(0, str(directory))
-    from credentials import get_credentials, login
-    return get_credentials, login
+    from credentials import get_credentials, login, prompt_login_inputs
+    return get_credentials, login, prompt_login_inputs
 
 
 def setup_kiro_parser(parser) -> None:
     sub = parser.add_subparsers(dest="kiro_command", required=True)
     login_parser = sub.add_parser("login", help="Sign in to Kiro via IAM Identity Center")
-    login_parser.add_argument("--start-url", default="https://view.awsapps.com/start", help="IAM Identity Center URL; defaults to AWS Builder ID")
-    login_parser.add_argument("--region", default="us-east-1")
+    login_parser.add_argument("--start-url", help="IAM Identity Center URL; omit for interactive setup")
+    login_parser.add_argument("--region", help="IAM Identity Center region; omit for interactive setup")
     sub.add_parser("status", help="Show Kiro login status")
 
 
 def handle_kiro(args) -> None:
-    get_credentials, login = _credentials()
+    get_credentials, login, prompt_login_inputs = _credentials()
     if args.kiro_command == "login":
-        login(args.start_url, args.region)
+        login(*prompt_login_inputs(args.start_url, args.region))
         print("Kiro login saved. Restart Hermes, then select provider kiro.")
         return
     creds = get_credentials()
@@ -45,7 +45,7 @@ def handle_kiro_slash(raw_args: str) -> str:
     parts = shlex.split(raw_args or "")
     if parts[:1] == ["status"]:
         try:
-            get_credentials, _ = _credentials()
+            get_credentials, _, _ = _credentials()
             creds = get_credentials()
             import time
             return f"Kiro logged in; IdC region={creds.region}; expires in {int(creds.expires_at - time.time())}s."

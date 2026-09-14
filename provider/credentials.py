@@ -173,6 +173,18 @@ def login(start_url: str = BUILDER_ID_START_URL, region: str = "us-east-1") -> t
     raise KiroAuthError("Device authorization expired; run login again")
 
 
+def prompt_login_inputs(start_url: str | None, region: str | None, input_fn=input) -> tuple[str, str]:
+    """Resolve CLI flags interactively while preserving scriptable flags."""
+    if start_url is None:
+        choice = input_fn("Login type: [1] AWS Builder ID, [2] IAM Identity Center URL [1]: ").strip()
+        if choice not in {"", "1", "2"}:
+            raise KiroAuthError("Choose 1 for AWS Builder ID or 2 for IAM Identity Center")
+        start_url = BUILDER_ID_START_URL if choice in {"", "1"} else input_fn("IAM Identity Center start URL: ").strip()
+    if region is None:
+        region = input_fn("IAM Identity Center region [us-east-1]: ").strip() or "us-east-1"
+    return start_url, region
+
+
 def get_credentials(force_refresh: bool = False) -> Credentials:
     global _CACHED
     with _LOCK:
@@ -196,12 +208,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Hermes-native Kiro IdC login")
     sub = parser.add_subparsers(dest="command", required=True)
     command = sub.add_parser("login")
-    command.add_argument("--start-url", default=BUILDER_ID_START_URL, help="IAM Identity Center URL; defaults to AWS Builder ID")
-    command.add_argument("--region", default="us-east-1")
+    command.add_argument("--start-url", help="IAM Identity Center URL; omit for interactive setup")
+    command.add_argument("--region", help="IAM Identity Center region; omit for interactive setup")
     sub.add_parser("status")
     args = parser.parse_args()
     if args.command == "login":
-        login(args.start_url, args.region)
+        login(*prompt_login_inputs(args.start_url, args.region))
         print("Kiro login saved. Restart Hermes, then select provider kiro.")
     else:
         creds = get_credentials()

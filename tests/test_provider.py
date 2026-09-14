@@ -9,7 +9,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parents[1] / "provider"))
 
 import client
-from credentials import BUILDER_ID_START_URL, KiroAuthError, runtime_region, validate_start_url
+from credentials import BUILDER_ID_START_URL, KiroAuthError, prompt_login_inputs, runtime_region, validate_start_url
 from translate import build_request
 
 
@@ -21,6 +21,13 @@ def test_start_url_is_strict_and_region_maps():
         validate_start_url("http://evil.example/start")
     with pytest.raises(KiroAuthError):
         runtime_region("attacker.example")
+
+
+def test_interactive_login_defaults_to_builder_id_or_accepts_custom_idc():
+    defaults = iter(["", ""])
+    custom = iter(["2", "https://d-abc.awsapps.com/start", "eu-west-1"])
+    assert prompt_login_inputs(None, None, lambda _: next(defaults)) == (BUILDER_ID_START_URL, "us-east-1")
+    assert prompt_login_inputs(None, None, lambda _: next(custom)) == ("https://d-abc.awsapps.com/start", "eu-west-1")
 
 
 def test_request_hoists_system_and_never_sends_empty_user_content():
