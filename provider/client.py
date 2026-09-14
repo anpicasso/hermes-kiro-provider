@@ -5,7 +5,6 @@ import asyncio
 import json
 import time
 import urllib.error
-import urllib.parse
 import urllib.request
 import uuid
 from types import SimpleNamespace
@@ -13,24 +12,23 @@ from typing import Any, Iterator
 
 from botocore.eventstream import EventStreamBuffer
 
-from credentials import KiroAuthError, get_credentials
+from credentials import KiroAuthError, get_credentials, save_credentials
 from translate import build_request
 
 _FALLBACK = ("claude-sonnet-4.5", "claude-haiku-4.5", "gpt-5.6-terra")
 _END = object()
 
 
-def _management(creds, path: str, *, params: dict | None = None, method: str = "GET") -> dict:
-    url = f"https://management.{creds.api_region}.kiro.dev/{path}"
-    data = None
-    if method == "GET" and params:
-        url += "?" + urllib.parse.urlencode(params)
-    elif method == "POST":
-        data = json.dumps(params or {}).encode()
-    headers = {"Accept": "application/json", "Authorization": f"Bearer {creds.access_token}"}
-    if data is not None:
-        headers["Content-Type"] = "application/json"
-    request = urllib.request.Request(url, data=data, headers=headers, method=method)
+def _management(creds, target: str, payload: dict) -> dict:
+    """Kiro's control plane is target-dispatched, not REST-path dispatched."""
+    url = f"https://management.{creds.api_region}.kiro.dev/"
+    headers = {
+        "Accept": "application/json", "Authorization": f"Bearer {creds.access_token}",
+        "Content-Type": "application/x-amz-json-1.0", "x-amz-target": target,
+        "TokenType": "SSO_OIDC", "amz-sdk-invocation-id": str(uuid.uuid4()),
+        "amz-sdk-request": "attempt=1; max=3",
+    }
+    request = urllib.request.Request(url, data=json.dumps(payload).encode(), headers=headers, method="POST")
     with urllib.request.urlopen(request, timeout=30) as response:
         result = json.loads(response.read() or b"{}")
     return result if isinstance(result, dict) else {}
@@ -39,14 +37,29 @@ def _management(creds, path: str, *, params: dict | None = None, method: str = "
 def list_model_ids() -> list[str]:
     try:
         creds = get_credentials()
-        params = {"origin": "KIRO_CLI"}
-        if creds.profile_arn:
-            params["profileArn"] = creds.profile_arn
-        data = _management(creds, "List-Available-Models", params=params)
+        profile_arn = _ensure_profile_arn(creds)
+        if not profile_arn:
+            return list(_FALLBACK)
+        data = _management(creds, "KiroControlPlaneBearerService.ListAvailableModels", {"origin": "KIRO_CLI", "profileArn": profile_arn})
         models = [str(m["modelId"]) for m in data.get("models") or [] if isinstance(m, dict) and isinstance(m.get("modelId"), str)]
         return models or list(_FALLBACK)
     except Exception:
         return list(_FALLBACK)
+
+
+def _ensure_profile_arn(creds) -> str:
+    """Discover the IdC profile once; Builder ID must not make this denied call."""
+    if creds.profile_arn:
+        return creds.profile_arn
+    if getattr(creds, "is_builder_id", False):
+        return ""
+    data = _management(creds, "KiroControlPlaneBearerService.ListAvailableProfiles", {})
+    for profile in data.get("profiles") or []:
+        if isinstance(profile, dict) and (arn := str(profile.get("profileArn") or profile.get("arn") or "").strip()):
+            creds.profile_arn = arn
+            save_credentials(creds)
+            return arn
+    raise KiroAuthError("Kiro IAM Identity Center returned no profile ARN")
 
 
 def _chunk(model: str, delta: dict, finish: str | None = None) -> SimpleNamespace:
@@ -108,9 +121,9 @@ class KiroClient:
 
     def _open(self, body: dict, force_refresh: bool = False):
         creds = get_credentials(force_refresh=force_refresh)
-        # ponytail: Builder ID/IdC do not have a Kiro profile ARN; sending one gives Builder ID a 403.
-        if creds.profile_arn:
-            body["profileArn"] = creds.profile_arn
+        # ponytail: Builder ID rejects profile discovery; corporate IdC requires the discovered ARN.
+        if profile_arn := _ensure_profile_arn(creds):
+            body["profileArn"] = profile_arn
         ua = "aws-sdk-python/1.0 KiroIDE-hermes"
         request = urllib.request.Request(f"https://runtime.{creds.api_region}.kiro.dev/generateAssistantResponse", data=json.dumps(body).encode(), method="POST", headers={"Authorization": f"Bearer {creds.access_token}", "Content-Type": "application/x-amz-json-1.0", "Accept": "application/vnd.amazon.eventstream", "x-amz-target": "AmazonCodeWhispererStreamingService.GenerateAssistantResponse", "x-amzn-codewhisperer-optout": "true", "x-amzn-kiro-agent-mode": "vibe", "amz-sdk-invocation-id": str(uuid.uuid4()), "amz-sdk-request": "attempt=1; max=2", "User-Agent": ua, "x-amz-user-agent": ua})
         return urllib.request.urlopen(request, timeout=600)
@@ -141,7 +154,13 @@ class KiroClient:
     def _create(self, *, model: str, messages: list[dict], stream: bool = False, tools: Any = None, extra_body: dict | None = None, **_: Any):
         effort = (extra_body or {}).get("reasoning")
         body = build_request(messages, tools, model, effort)
-        return self._stream(model, body) if stream else self._complete(model, body)
+        if stream:
+            return self._stream(model, body)
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return self._complete(model, body)
+        return asyncio.to_thread(self._complete, model, body)
 
     @staticmethod
     def _add_tool_event(calls: dict[str, dict[str, str]], data: dict) -> None:

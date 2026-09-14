@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sys
 import asyncio
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -65,11 +66,25 @@ def test_empty_success_stream_is_an_error(monkeypatch):
 def test_builder_id_request_omits_profile_arn(monkeypatch):
     instance = client.KiroClient()
     captured = {}
-    creds = SimpleNamespace(api_region="us-east-1", access_token="token", profile_arn="")
+    creds = SimpleNamespace(api_region="us-east-1", access_token="token", profile_arn="", is_builder_id=True)
     monkeypatch.setattr(client, "get_credentials", lambda **_: creds)
     monkeypatch.setattr(client.urllib.request, "urlopen", lambda request, timeout: captured.setdefault("request", request))
     instance._open({"conversationState": {}})
     assert "profileArn" not in json.loads(captured["request"].data)
+
+
+def test_idc_discovers_profile_arn_without_prompting(monkeypatch):
+    instance = client.KiroClient()
+    captured = {}
+    calls = []
+    creds = SimpleNamespace(api_region="us-east-1", access_token="token", profile_arn="", is_builder_id=False)
+    monkeypatch.setattr(client, "get_credentials", lambda **_: creds)
+    monkeypatch.setattr(client, "save_credentials", lambda _: None)
+    monkeypatch.setattr(client, "_management", lambda *_: calls.append(True) or {"profiles": [{"arn": "arn:aws:codewhisperer:us-east-1:1:profile/team"}]})
+    monkeypatch.setattr(client.urllib.request, "urlopen", lambda request, timeout: captured.setdefault("request", request))
+    instance._open({"conversationState": {}})
+    assert calls and creds.profile_arn.endswith("profile/team")
+    assert json.loads(captured["request"].data)["profileArn"] == creds.profile_arn
 
 
 def test_tool_calls_round_trip_and_nonstream_is_awaitable(monkeypatch):
@@ -84,9 +99,9 @@ def test_tool_calls_round_trip_and_nonstream_is_awaitable(monkeypatch):
     assert (call.id, call.function.name, call.function.arguments) == ("call_1", "read_file", '{"path":"x"}')
 
     async def get_response():
-        return await response
+        return await instance.chat.completions.create(model="claude-sonnet-4.5", messages=[{"role": "user", "content": "hi"}])
 
-    assert asyncio.run(get_response()) is response
+    assert asyncio.run(get_response()).choices[0].message.tool_calls[0].function.name == "read_file"
 
     async def get_stream():
         chunks = []
@@ -95,6 +110,25 @@ def test_tool_calls_round_trip_and_nonstream_is_awaitable(monkeypatch):
         return chunks
 
     assert asyncio.run(get_stream())[-1].choices[0].finish_reason == "tool_calls"
+
+
+def test_async_nonstream_does_not_block_event_loop(monkeypatch):
+    instance = client.KiroClient()
+
+    def slow_events(_):
+        time.sleep(0.2)
+        yield "assistantResponseEvent", {"content": "OK"}
+
+    monkeypatch.setattr(instance, "_events", slow_events)
+
+    async def run():
+        started = time.monotonic()
+        task = asyncio.create_task(instance.chat.completions.create(model="claude-sonnet-4.5", messages=[{"role": "user", "content": "hi"}]))
+        await asyncio.sleep(0.01)
+        assert time.monotonic() - started < 0.1
+        return await task
+
+    assert asyncio.run(run()).choices[0].message.content == "OK"
 
 
 def test_tool_history_keeps_specs_and_does_not_mix_system_with_result():
@@ -109,3 +143,21 @@ def test_tool_history_keeps_specs_and_does_not_mix_system_with_result():
     result = current["userInputMessageContext"]["toolResults"][0]
     assert tools[0]["toolSpecification"]["name"] == "read_file"
     assert result["content"] == [{"text": "/tmp/x"}]
+    assert "SYSTEM" in request["conversationState"]["history"][0]["userInputMessage"]["content"]
+
+
+def test_parallel_tool_results_share_one_user_turn():
+    request = build_request([
+        {"role": "system", "content": "SYSTEM"},
+        {"role": "user", "content": "Read x and y"},
+        {"role": "assistant", "tool_calls": [
+            {"id": "call_x", "function": {"name": "read_file", "arguments": '{"path":"x"}'}},
+            {"id": "call_y", "function": {"name": "read_file", "arguments": '{"path":"y"}'}},
+        ]},
+        {"role": "tool", "tool_call_id": "call_x", "content": "x"},
+        {"role": "tool", "tool_call_id": "call_y", "content": "y"},
+    ], [], "claude-sonnet-4.5", None, "c")
+    state = request["conversationState"]
+    assert len(state["history"]) == 2
+    assert [item["text"] for item in state["currentMessage"]["userInputMessage"]["userInputMessageContext"]["toolResults"][0]["content"]] == ["x"]
+    assert len(state["currentMessage"]["userInputMessage"]["userInputMessageContext"]["toolResults"]) == 2

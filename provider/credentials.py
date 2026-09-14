@@ -51,6 +51,10 @@ class Credentials:
     def expiring(self) -> bool:
         return time.time() >= self.expires_at - 300
 
+    @property
+    def is_builder_id(self) -> bool:
+        return self.start_url.rstrip("/") == BUILDER_ID_START_URL.rstrip("/")
+
 
 def hermes_home() -> Path:
     return Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
@@ -113,6 +117,13 @@ def _write(creds: Credentials) -> None:
     finally:
         if os.path.exists(name):
             os.unlink(name)
+
+
+def save_credentials(creds: Credentials) -> None:
+    """Persist a token or IdC profile update made by the native transport."""
+    global _CACHED
+    _CACHED = creds
+    _write(creds)
 
 
 def _read() -> Credentials:
@@ -201,8 +212,7 @@ def get_credentials(force_refresh: bool = False) -> Credentials:
         creds.access_token = access
         creds.refresh_token = token.get("refreshToken") or creds.refresh_token
         creds.expires_at = time.time() + float(token.get("expiresIn") or 3600)
-        _CACHED = creds
-        _write(creds)
+        save_credentials(creds)
         return creds
 
 
