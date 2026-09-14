@@ -43,7 +43,7 @@ profile = KiroProfile(
     base_url="https://runtime.us-east-1.kiro.dev",
     hostname="runtime.us-east-1.kiro.dev",
     supports_health_check=False,
-    supports_vision=True,
+    supports_vision=False,
     fallback_models=_FALLBACK_MODELS,
     default_aux_model="claude-haiku-4.5",
 )

@@ -7,6 +7,7 @@ from typing import Any
 
 _EMPTY = "Please proceed with the task."
 _TOOL = "Tool results provided."
+_EMPTY_SCHEMA = {"type": "object", "properties": {}}
 
 
 def _text(content: Any) -> str:
@@ -17,13 +18,21 @@ def _text(content: Any) -> str:
     return ""
 
 
-def _tool_specs(tools: Any) -> list[dict]:
-    result = []
+def _tool_specs(tools: Any, messages: list[dict]) -> list[dict]:
+    """Keep definitions for replayed tool calls; Kiro rejects orphaned results."""
+    specs: dict[str, dict] = {}
     for tool in tools or []:
         fn = tool.get("function", {}) if isinstance(tool, dict) else {}
-        if fn.get("name"):
-            result.append({"toolSpecification": {"name": fn["name"], "description": fn.get("description") or fn["name"], "inputSchema": {"json": fn.get("parameters") or {"type": "object", "properties": {}}}}})
-    return result
+        name = fn.get("name")
+        if name:
+            specs[name] = {"toolSpecification": {"name": name, "description": fn.get("description") or name, "inputSchema": {"json": fn.get("parameters") or _EMPTY_SCHEMA}}}
+    for message in messages:
+        for call in message.get("tool_calls") or []:
+            fn = call.get("function") or {}
+            name = fn.get("name")
+            if name and name not in specs:
+                specs[name] = {"toolSpecification": {"name": name, "description": name, "inputSchema": {"json": _EMPTY_SCHEMA}}}
+    return list(specs.values())
 
 
 def _assistant(message: dict) -> dict:
@@ -41,6 +50,10 @@ def _assistant(message: dict) -> dict:
     return {"assistantResponseMessage": item}
 
 
+def _tool_result(message: dict) -> dict:
+    return {"toolUseId": message.get("tool_call_id") or "", "status": "error" if message.get("is_error") else "success", "content": [{"text": _text(message.get("content")) or "(no output)"}]}
+
+
 def build_request(messages: list[dict], tools: Any, model: str, effort: dict | None, conversation_id: str | None = None) -> dict:
     system = "\n\n".join(_text(m.get("content")) for m in messages if m.get("role") == "system").strip()
     conversation = [m for m in messages if m.get("role") != "system"]
@@ -53,16 +66,18 @@ def build_request(messages: list[dict], tools: Any, model: str, effort: dict | N
         elif role == "user":
             history.append({"userInputMessage": {"content": _text(message.get("content")) or _EMPTY, "modelId": model, "origin": "KIRO_CLI"}})
         elif role == "tool":
-            history.append({"userInputMessage": {"content": _TOOL, "modelId": model, "origin": "KIRO_CLI", "userInputMessageContext": {"toolResults": [{"toolUseId": message.get("tool_call_id") or "", "status": "error" if message.get("is_error") else "success", "content": [{"text": _text(message.get("content")) or "(no output)"}]}]}}})
+            history.append({"userInputMessage": {"content": _TOOL, "modelId": model, "origin": "KIRO_CLI", "userInputMessageContext": {"toolResults": [_tool_result(message)]}}})
     text = _text(current.get("content"))
-    if system:
+    if system and current.get("role") == "user":
         text = f"{system}\n\n{text}".strip()
     user: dict[str, Any] = {"content": text or (_TOOL if current.get("role") == "tool" else _EMPTY), "modelId": model, "origin": "KIRO_CLI"}
-    specs = _tool_specs(tools)
+    context: dict[str, Any] = {}
     if current.get("role") == "tool":
-        user["userInputMessageContext"] = {"toolResults": [{"toolUseId": current.get("tool_call_id") or "", "status": "error" if current.get("is_error") else "success", "content": [{"text": text or "(no output)"}]}]}
-    if specs:
-        user.setdefault("userInputMessageContext", {})["tools"] = specs
+        context["toolResults"] = [_tool_result(current)]
+    if specs := _tool_specs(tools, conversation + [current]):
+        context["tools"] = specs
+    if context:
+        user["userInputMessageContext"] = context
     state: dict[str, Any] = {"chatTriggerType": "MANUAL", "agentTaskType": "vibe", "conversationId": conversation_id or uuid.uuid4().hex, "currentMessage": {"userInputMessage": user}}
     if history:
         state["history"] = history

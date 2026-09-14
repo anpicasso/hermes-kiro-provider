@@ -72,7 +72,7 @@ def runtime_region(region: str) -> str:
 def validate_start_url(value: str) -> str:
     parsed = urllib.parse.urlparse((value or "").strip())
     host = (parsed.hostname or "").lower()
-    if parsed.scheme != "https" or parsed.username or parsed.password or parsed.port or not host.endswith("awsapps.com"):
+    if parsed.scheme != "https" or parsed.username or parsed.password or parsed.port or (host != "awsapps.com" and not host.endswith(".awsapps.com")):
         raise KiroAuthError("start URL must be an HTTPS awsapps.com IAM Identity Center URL")
     if parsed.query or parsed.fragment:
         raise KiroAuthError("start URL must not include a query string or fragment")
@@ -189,6 +189,8 @@ def get_credentials(force_refresh: bool = False) -> Credentials:
     global _CACHED
     with _LOCK:
         creds = _CACHED or _read()
+        if creds.client_secret_expires_at and time.time() >= creds.client_secret_expires_at:
+            raise KiroAuthError("Kiro client registration expired; run login again")
         if not force_refresh and not creds.expiring:
             _CACHED = creds
             return creds
