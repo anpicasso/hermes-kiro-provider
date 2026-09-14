@@ -83,6 +83,13 @@ def format_usage(data: dict) -> str:
     buckets = data.get("usageBreakdownList") or []
     if not isinstance(buckets, list) or not buckets:
         return "Kiro returned no usage buckets."
+
+    def display(value: object) -> str:
+        try:
+            return f"{float(str(value)):,.2f}".rstrip("0").rstrip(".")
+        except (TypeError, ValueError):
+            return str(value)
+
     lines = ["Kiro usage:"]
     for index, bucket in enumerate(buckets, 1):
         if not isinstance(bucket, dict):
@@ -90,16 +97,35 @@ def format_usage(data: dict) -> str:
         current, limit = bucket.get("currentUsage"), bucket.get("usageLimit")
         name = bucket.get("displayName") or bucket.get("usageType") or bucket.get("resourceType") or f"Allowance {index}"
         try:
-            percent = f" ({float(str(current)) / float(str(limit)) * 100:.0f}%)" if float(str(limit)) > 0 else ""
+            current_number, limit_number = float(str(current)), float(str(limit))
+            included = min(current_number, limit_number)
+            percent = f" ({included / limit_number * 100:.0f}%)" if limit_number > 0 else ""
         except (TypeError, ValueError):
-            percent = ""
+            included, percent = current, ""
         reset = bucket.get("nextDateReset")
         if reset:
             try:
                 reset = datetime.fromtimestamp(float(str(reset)), tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
             except (TypeError, ValueError, OSError):
                 pass
-        lines.append(f"- {name}: {current}/{limit}{percent}" + (f"; resets {reset}" if reset else ""))
+        lines.append(f"- {name}: {display(included)}/{display(limit)}{percent}" + (f"; resets {reset}" if reset else ""))
+
+        if any(key in bucket for key in ("currentOverages", "currentOveragesWithPrecision", "overageCap", "overageCharges")):
+            overage = bucket.get("currentOveragesWithPrecision", bucket.get("currentOverages", 0))
+            cap = bucket.get("overageCapWithPrecision", bucket.get("overageCap", 0))
+            try:
+                overage_number, cap_number = float(str(overage)), float(str(cap))
+                cap_percent = f" ({overage_number / cap_number * 100:.0f}% of cap)" if cap_number > 0 else ""
+            except (TypeError, ValueError):
+                cap_percent = ""
+            plural = str(bucket.get("displayNamePlural") or f"{name}s").lower()
+            extra = f"  Extra usage: {display(overage)}/{display(cap)} {plural}{cap_percent}"
+            rate, charges, currency = bucket.get("overageRate"), bucket.get("overageCharges"), bucket.get("currency")
+            try:
+                extra += f"; ${float(str(charges)):.2f} {currency or 'USD'} at ${display(rate)}/{str(name).lower()}"
+            except (TypeError, ValueError):
+                pass
+            lines.append(extra)
     return "\n".join(lines)
 
 

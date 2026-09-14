@@ -161,6 +161,18 @@ def test_builder_id_uses_live_bare_model_catalog_and_usage(monkeypatch):
     assert "3/10 (30%)" in client.format_usage({"usageBreakdownList": [{"usageType": "Agent", "currentUsage": 3, "usageLimit": 10}]})
 
 
+def test_usage_splits_included_credit_from_overage():
+    usage = client.format_usage({"usageBreakdownList": [{
+        "displayName": "Credit", "displayNamePlural": "Credits",
+        "currentUsage": 1860, "usageLimit": 1000,
+        "currentOveragesWithPrecision": 860.55, "overageCapWithPrecision": 10000,
+        "overageCharges": 34.4222627, "overageRate": 0.04, "currency": "USD",
+        "nextDateReset": 1790812800.0,
+    }]})
+    assert "- Credit: 1,000/1,000 (100%); resets 2026-10-01 00:00 UTC" in usage
+    assert "  Extra usage: 860.55/10,000 credits (9% of cap); $34.42 USD at $0.04/credit" in usage
+
+
 def test_refresh_is_single_flight_for_concurrent_expired_requests(monkeypatch):
     creds = credentials.Credentials("old", "refresh", "id", "secret", "us-east-1", BUILDER_ID_START_URL, 0)
     calls = []
