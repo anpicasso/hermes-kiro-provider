@@ -76,6 +76,27 @@ def test_empty_success_stream_is_an_error(monkeypatch):
         list(instance.chat.completions.create(model="claude-sonnet-4.5", messages=[{"role": "user", "content": "hi"}], stream=True))
 
 
+def test_provider_client_explains_when_login_companion_is_missing():
+    instance = client.KiroClient(companion_error="Install the Kiro login-command companion.")
+    with pytest.raises(KiroAuthError, match="login-command companion"):
+        instance.chat.completions.create(model="claude-sonnet-4.5", messages=[{"role": "user", "content": "hi"}])
+
+
+def test_each_component_explains_its_missing_companion(monkeypatch, tmp_path):
+    import commands
+    import provider
+
+    monkeypatch.setattr(commands, "_provider_dir", lambda: tmp_path / "kiro-provider")
+    assert "provider companion" in commands.handle_kiro_slash("status")
+
+    monkeypatch.setattr(provider, "_commands_companion_error", lambda: "Install the Kiro login-command companion.")
+    with pytest.raises(KiroAuthError, match="login-command companion"):
+        provider.profile.fetch_models()
+    instance = provider.profile.create_client()
+    with pytest.raises(KiroAuthError, match="login-command companion"):
+        instance.chat.completions.create(model="claude-sonnet-4.5", messages=[{"role": "user", "content": "hi"}])
+
+
 def test_event_decoder_handles_a_frame_split_mid_prelude(monkeypatch):
     class Response:
         def __init__(self):

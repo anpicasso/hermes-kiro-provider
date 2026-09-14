@@ -160,10 +160,11 @@ class KiroClient:
     HERMES_SKIP_TRANSPORT_WRAP = True
     HERMES_SKIP_ASYNC_WRAP = True
 
-    def __init__(self, **_: Any) -> None:
+    def __init__(self, companion_error: str | None = None, **_: Any) -> None:
         self.api_key = "kiro-oauth-local"
         self.base_url = "https://runtime.us-east-1.kiro.dev"
         self.is_closed = False
+        self._companion_error = companion_error
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
 
     def close(self) -> None:
@@ -238,6 +239,8 @@ class KiroClient:
                 release()
 
     def _create(self, *, model: str, messages: list[dict], stream: bool = False, tools: Any = None, extra_body: dict | None = None, **_: Any):
+        if self._companion_error:
+            raise KiroAuthError(self._companion_error)
         effort = (extra_body or {}).get("reasoning")
         body = build_request(messages, tools, model, effort)
         if stream:

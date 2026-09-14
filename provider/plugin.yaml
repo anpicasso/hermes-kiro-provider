@@ -3,3 +3,4 @@ kind: model-provider
 version: 0.1.0
 description: Native Kiro provider for Hermes using IAM Identity Center device authorization.
 author: anpicasso
+manifest_version: 2

@@ -17,10 +17,29 @@ from client import KiroClient, list_model_ids  # noqa: E402
 _FALLBACK_MODELS = ("claude-sonnet-4.5", "claude-haiku-4.5", "gpt-5.6-terra")
 _CATALOG_MODELS = _FALLBACK_MODELS
 _CATALOG_AT = 0.0
+_INSTALL_COMMANDS = "hermes plugins install anpicasso/hermes-plugin-kiro/commands --no-enable"
+
+
+def _commands_companion_error() -> str | None:
+    """Return an actionable error until the required login command surface exists."""
+    try:
+        from hermes_constants import get_hermes_home
+        directory = get_hermes_home() / "plugins" / "kiro"
+    except Exception:
+        directory = _HERE.parents[1] / "commands"
+    if (directory / "plugin.yaml").is_file():
+        return None
+    return (
+        "Kiro provider requires its login-command companion. Install it before using provider kiro:\n"
+        f"  {_INSTALL_COMMANDS}\n"
+        "  hermes plugins enable kiro"
+    )
 
 
 def _catalog_models() -> tuple:
     global _CATALOG_MODELS, _CATALOG_AT
+    if _commands_companion_error():
+        return ()
     if time.monotonic() - _CATALOG_AT >= 300:
         try:
             models = tuple(list_model_ids())
@@ -42,9 +61,12 @@ class KiroProfile(ProviderProfile):
         _CATALOG_MODELS = tuple(value or _FALLBACK_MODELS)
 
     def create_client(self, **kwargs):
-        return KiroClient(**kwargs)
+        return KiroClient(companion_error=_commands_companion_error(), **kwargs)
 
     def fetch_models(self, **kwargs):
+        if error := _commands_companion_error():
+            from credentials import KiroAuthError
+            raise KiroAuthError(error)
         return list_model_ids() or list(self.fallback_models)
 
 

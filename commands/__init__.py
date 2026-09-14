@@ -6,6 +6,13 @@ import sys
 from pathlib import Path
 
 
+class KiroCompanionMissing(RuntimeError):
+    pass
+
+
+_INSTALL_PROVIDER = "hermes plugins install anpicasso/hermes-plugin-kiro/provider --no-enable"
+
+
 def _provider_dir() -> Path:
     try:
         from hermes_constants import get_hermes_home
@@ -14,8 +21,18 @@ def _provider_dir() -> Path:
         return Path(__file__).resolve().parents[1] / "provider"
 
 
-def _kiro():
+def _require_provider() -> Path:
     directory = _provider_dir()
+    if (directory / "plugin.yaml").is_file():
+        return directory
+    raise KiroCompanionMissing(
+        "Kiro login commands need the Kiro provider companion. Install it, then restart the gateway if it is running:\n"
+        f"  {_INSTALL_PROVIDER}"
+    )
+
+
+def _kiro():
+    directory = _require_provider()
     if str(directory) not in sys.path:
         sys.path.insert(0, str(directory))
     from client import format_usage, get_usage_limits
@@ -35,7 +52,11 @@ def setup_kiro_parser(parser) -> None:
 
 
 def handle_kiro(args) -> None:
-    get_credentials, login, logout, prompt_login_inputs, get_usage_limits, format_usage = _kiro()
+    try:
+        get_credentials, login, logout, prompt_login_inputs, get_usage_limits, format_usage = _kiro()
+    except KiroCompanionMissing as exc:
+        print(exc, file=sys.stderr)
+        return
     if args.kiro_command == "login":
         login(*prompt_login_inputs(args.start_url, args.region))
         print("Kiro login saved. New CLI chats can use it immediately; restart only a running Hermes gateway.")
@@ -59,6 +80,10 @@ def handle_kiro_slash(raw_args: str) -> str:
         parts = shlex.split(raw_args or "")
     except ValueError as exc:
         return f"Invalid Kiro command: {exc}"
+    try:
+        _require_provider()
+    except KiroCompanionMissing as exc:
+        return str(exc)
     if parts[:1] == ["status"]:
         try:
             get_credentials, *_ = _kiro()

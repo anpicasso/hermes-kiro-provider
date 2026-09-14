@@ -30,6 +30,8 @@ Hermes discovers model providers and command plugins through separate native ext
 
 They share one credential store and one provider; the split exists only because a model-provider plugin is deliberately not loaded by Hermes' command-plugin manager.
 
+The components are deliberately **not usable independently**. The command component returns an install instruction until `kiro-provider` exists; the provider returns the reciprocal instruction until `kiro` exists. The one-line installer installs, validates, then enables the command component only after both are present.
+
 ### Why login needs its own plugin today
 
 The model-provider package is loaded for provider discovery, but Hermes does not run its command-registration hook and does not expose a plugin authentication callback for device authorization. The standalone package supplies that missing command surface while the provider continues to own the credentials and HTTPS client. [Upstream feature request #111258](https://github.com/NousResearch/hermes-agent/issues/111258) proposes a native provider-auth hook so a future version can remove this companion plugin.
@@ -70,6 +72,8 @@ hermes plugins install anpicasso/hermes-plugin-kiro/commands --no-enable
 hermes plugins install anpicasso/hermes-plugin-kiro/provider --no-enable
 hermes plugins enable kiro
 ```
+
+Installing either subdirectory directly is safe, but it remains unusable until its companion is installed. Hermes currently has no third-party post-install hook, so only the one-line installer can automatically enable `kiro` after confirming both components.
 
 `logout` removes only this plugin's local credentials. It does not invent a remote revoke endpoint.
 
