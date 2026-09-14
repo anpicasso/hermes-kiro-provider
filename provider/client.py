@@ -143,7 +143,13 @@ class KiroClient:
         with response:
             while raw := response.read(8192):
                 buffer.add_data(raw)
-                while event := buffer.next():
+                while True:
+                    try:
+                        event = buffer.next()
+                    except StopIteration:
+                        break
+                    if event is None:
+                        break
                     try:
                         payload = json.loads(event.payload)
                     except (TypeError, ValueError):

@@ -72,6 +72,33 @@ def test_empty_success_stream_is_an_error(monkeypatch):
         list(instance.chat.completions.create(model="claude-sonnet-4.5", messages=[{"role": "user", "content": "hi"}], stream=True))
 
 
+def test_event_decoder_stops_cleanly_when_buffer_is_drained(monkeypatch):
+    class Response:
+        def __init__(self):
+            self.reads = iter([b"frame", b""])
+
+        def read(self, _):
+            return next(self.reads)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+    class Buffer:
+        def add_data(self, _):
+            return None
+
+        def next(self):
+            raise StopIteration
+
+    instance = client.KiroClient()
+    monkeypatch.setattr(instance, "_open", lambda *_, **__: Response())
+    monkeypatch.setattr(client, "EventStreamBuffer", Buffer)
+    assert list(instance._events({})) == []
+
+
 def test_builder_id_request_omits_profile_arn(monkeypatch):
     instance = client.KiroClient()
     captured = {}
