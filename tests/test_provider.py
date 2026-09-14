@@ -12,7 +12,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parents[1] / "provider"))
 
 import client
-from credentials import BUILDER_ID_START_URL, KiroAuthError, prompt_login_inputs, runtime_region, validate_start_url
+from credentials import BUILDER_ID_START_URL, KiroAuthError, _next_login_choice, prompt_login_inputs, runtime_region, validate_start_url
 from translate import build_request
 
 
@@ -33,6 +33,15 @@ def test_interactive_login_defaults_to_builder_id_or_accepts_custom_idc():
     custom = iter(["2", "https://d-abc.awsapps.com/start", "eu-west-1"])
     assert prompt_login_inputs(None, None, lambda _: next(defaults)) == (BUILDER_ID_START_URL, "us-east-1")
     assert prompt_login_inputs(None, None, lambda _: next(custom)) == ("https://d-abc.awsapps.com/start", "eu-west-1")
+
+
+def test_login_selector_moves_with_arrow_keys_and_fallback_is_spaced():
+    assert _next_login_choice(0, "down") == 1
+    assert _next_login_choice(1, "up") == 0
+    prompts = []
+    values = iter(["", ""])
+    prompt_login_inputs(None, None, lambda text: prompts.append(text) or next(values))
+    assert "\n  1. AWS Builder ID\n  2. IAM Identity Center\n\n" in prompts[0]
 
 
 def test_request_hoists_system_and_never_sends_empty_user_content():

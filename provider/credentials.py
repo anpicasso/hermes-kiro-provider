@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 import tempfile
 import time
 import urllib.error
@@ -184,15 +185,67 @@ def login(start_url: str = BUILDER_ID_START_URL, region: str = "us-east-1") -> t
     raise KiroAuthError("Device authorization expired; run login again")
 
 
+def _next_login_choice(selected: int, key: str) -> int:
+    if key == "up":
+        return max(0, selected - 1)
+    if key == "down":
+        return min(1, selected + 1)
+    return selected
+
+
+def _arrow_login_choice() -> str | None:
+    """Return a keyboard-selected method, or None when stdin is not a terminal."""
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        return None
+    try:
+        import termios
+        import tty
+    except ImportError:
+        return None
+    selected = 0
+    fd = sys.stdin.fileno()
+    previous = termios.tcgetattr(fd)
+
+    def draw() -> None:
+        options = ("AWS Builder ID", "IAM Identity Center")
+        sys.stdout.write("\x1b[2J\x1b[H\nKiro login\n\nSelect login method:\n\n")
+        for index, option in enumerate(options):
+            sys.stdout.write(f"  {'❯' if index == selected else ' '} {option}\n")
+        sys.stdout.write("\nUse ↑ / ↓ to choose, then Enter.\n")
+        sys.stdout.flush()
+
+    try:
+        tty.setcbreak(fd)
+        sys.stdout.write("\x1b[?25l")
+        draw()
+        while True:
+            key = sys.stdin.read(1)
+            if key in {"\r", "\n"}:
+                return str(selected + 1)
+            if key == "\x03":
+                raise KeyboardInterrupt
+            if key == "\x1b" and sys.stdin.read(1) == "[":
+                key = sys.stdin.read(1)
+                selected = _next_login_choice(selected, "up" if key == "A" else "down" if key == "B" else "")
+                draw()
+            elif key in {"1", "2"}:
+                selected = int(key) - 1
+                draw()
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, previous)
+        sys.stdout.write("\x1b[?25h\n")
+        sys.stdout.flush()
+
+
 def prompt_login_inputs(start_url: str | None, region: str | None, input_fn=input) -> tuple[str, str]:
     """Resolve CLI flags interactively while preserving scriptable flags."""
     if start_url is None:
-        choice = input_fn("Login type: [1] AWS Builder ID, [2] IAM Identity Center URL [1]: ").strip()
+        choice = _arrow_login_choice() or input_fn("\nSelect login method:\n\n  1. AWS Builder ID\n  2. IAM Identity Center\n\nChoice [1]: ").strip()
         if choice not in {"", "1", "2"}:
             raise KiroAuthError("Choose 1 for AWS Builder ID or 2 for IAM Identity Center")
-        start_url = BUILDER_ID_START_URL if choice in {"", "1"} else input_fn("IAM Identity Center start URL: ").strip()
+        start_url = BUILDER_ID_START_URL if choice in {"", "1"} else input_fn("\nIAM Identity Center start URL:\n\n> ").strip()
     if region is None:
-        region = input_fn("IAM Identity Center region [us-east-1]: ").strip() or "us-east-1"
+        region = input_fn("\nIAM Identity Center region [us-east-1]:\n\n> ").strip() or "us-east-1"
     return start_url, region
 
 
