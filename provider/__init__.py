@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
 from providers import register_provider
@@ -14,16 +15,31 @@ if str(_HERE) not in sys.path:
 from client import KiroClient, list_model_ids  # noqa: E402
 
 _FALLBACK_MODELS = ("claude-sonnet-4.5", "claude-haiku-4.5", "gpt-5.6-terra")
+_CATALOG_MODELS = _FALLBACK_MODELS
+_CATALOG_AT = 0.0
+
+
+def _catalog_models() -> tuple:
+    global _CATALOG_MODELS, _CATALOG_AT
+    if time.monotonic() - _CATALOG_AT >= 300:
+        try:
+            models = tuple(list_model_ids())
+            if models:
+                _CATALOG_MODELS = models
+        finally:
+            _CATALOG_AT = time.monotonic()
+    return _CATALOG_MODELS
 
 
 class KiroProfile(ProviderProfile):
     @property
     def fallback_models(self) -> tuple:
-        return getattr(self, "_seed_models", _FALLBACK_MODELS)
+        return _catalog_models()
 
     @fallback_models.setter
     def fallback_models(self, value: tuple) -> None:
-        self._seed_models = tuple(value or _FALLBACK_MODELS)
+        global _CATALOG_MODELS
+        _CATALOG_MODELS = tuple(value or _FALLBACK_MODELS)
 
     def create_client(self, **kwargs):
         return KiroClient(**kwargs)

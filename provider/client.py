@@ -4,8 +4,8 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-import urllib.error
-import urllib.request
+from datetime import datetime, timezone
+import urllib.parse
 import uuid
 from types import SimpleNamespace
 from typing import Any, Iterator
@@ -13,38 +13,94 @@ from typing import Any, Iterator
 from botocore.eventstream import EventStreamBuffer
 
 from credentials import KiroAuthError, get_credentials, save_credentials
+from transport import KiroHTTPError, request, request_json
 from translate import build_request
 
 _FALLBACK = ("claude-sonnet-4.5", "claude-haiku-4.5", "gpt-5.6-terra")
 _END = object()
 
 
-def _management(creds, target: str, payload: dict) -> dict:
-    """Kiro's control plane is target-dispatched, not REST-path dispatched."""
-    url = f"https://management.{creds.api_region}.kiro.dev/"
+def _headers(creds, *, accept: str = "application/json", target: str = "") -> dict[str, str]:
+    ua = "aws-sdk-python/1.0 KiroIDE-hermes"
     headers = {
-        "Accept": "application/json", "Authorization": f"Bearer {creds.access_token}",
-        "Content-Type": "application/x-amz-json-1.0", "x-amz-target": target,
-        "TokenType": "SSO_OIDC", "amz-sdk-invocation-id": str(uuid.uuid4()),
+        "Accept": accept,
+        "Authorization": f"Bearer {creds.access_token}",
+        "TokenType": "SSO_OIDC",
+        "User-Agent": ua,
+        "x-amz-user-agent": ua,
+        "x-amzn-codewhisperer-optout": "true",
+        "amz-sdk-invocation-id": str(uuid.uuid4()),
         "amz-sdk-request": "attempt=1; max=3",
     }
-    request = urllib.request.Request(url, data=json.dumps(payload).encode(), headers=headers, method="POST")
-    with urllib.request.urlopen(request, timeout=30) as response:
-        result = json.loads(response.read() or b"{}")
-    return result if isinstance(result, dict) else {}
+    if target:
+        headers["Content-Type"] = "application/x-amz-json-1.0"
+        headers["x-amz-target"] = target
+    return headers
+
+
+def _management(creds, target: str, payload: dict) -> dict:
+    """Kiro's target-dispatched control plane."""
+    return request_json(
+        "POST",
+        f"https://management.{creds.api_region}.kiro.dev/",
+        body=json.dumps(payload).encode(),
+        headers=_headers(creds, target=target),
+    )
+
+
+def _rest(creds, path: str, query: dict[str, str]) -> dict:
+    return request_json(
+        "GET",
+        f"https://codewhisperer.us-east-1.amazonaws.com/{path}?{urllib.parse.urlencode(query)}",
+        headers=_headers(creds),
+    )
 
 
 def list_model_ids() -> list[str]:
     try:
         creds = get_credentials()
         profile_arn = _ensure_profile_arn(creds)
-        if not profile_arn:
-            return list(_FALLBACK)
-        data = _management(creds, "KiroControlPlaneBearerService.ListAvailableModels", {"origin": "KIRO_CLI", "profileArn": profile_arn})
+        query = {"origin": "AI_EDITOR", "maxResults": "50"}
+        if profile_arn:
+            query["profileArn"] = profile_arn
+        data = _rest(creds, "ListAvailableModels", query)
         models = [str(m["modelId"]) for m in data.get("models") or [] if isinstance(m, dict) and isinstance(m.get("modelId"), str)]
         return models or list(_FALLBACK)
     except Exception:
         return list(_FALLBACK)
+
+
+def get_usage_limits() -> dict:
+    creds = get_credentials()
+    profile_arn = _ensure_profile_arn(creds)
+    query = {"isEmailRequired": "true", "origin": "AI_EDITOR", "resourceType": "AGENTIC_REQUEST"}
+    if profile_arn:
+        query["profileArn"] = profile_arn
+    return _rest(creds, "getUsageLimits", query)
+
+
+def format_usage(data: dict) -> str:
+    buckets = data.get("usageBreakdownList") or []
+    if not isinstance(buckets, list) or not buckets:
+        return "Kiro returned no usage buckets."
+    lines = ["Kiro usage:"]
+    for index, bucket in enumerate(buckets, 1):
+        if not isinstance(bucket, dict):
+            continue
+        current, limit = bucket.get("currentUsage"), bucket.get("usageLimit")
+        name = bucket.get("displayName") or bucket.get("usageType") or bucket.get("resourceType") or f"Allowance {index}"
+        try:
+            percent = f" ({float(str(current)) / float(str(limit)) * 100:.0f}%)" if float(str(limit)) > 0 else ""
+        except (TypeError, ValueError):
+            percent = ""
+        reset = bucket.get("nextDateReset")
+        if reset:
+            try:
+                reset = datetime.fromtimestamp(float(str(reset)), tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            except (TypeError, ValueError, OSError):
+                pass
+        lines.append(f"- {name}: {current}/{limit}{percent}" + (f"; resets {reset}" if reset else ""))
+    return "\n".join(lines)
 
 
 def _ensure_profile_arn(creds) -> str:
@@ -119,28 +175,41 @@ class KiroClient:
     def __exit__(self, *args):
         self.close()
 
-    def _open(self, body: dict, force_refresh: bool = False):
-        creds = get_credentials(force_refresh=force_refresh)
+    def _open(self, body: dict, force_refresh: bool = False, stale_access_token: str = ""):
+        creds = get_credentials(force_refresh=force_refresh, stale_access_token=stale_access_token)
         # ponytail: Builder ID rejects profile discovery; corporate IdC requires the discovered ARN.
         if profile_arn := _ensure_profile_arn(creds):
             body["profileArn"] = profile_arn
-        ua = "aws-sdk-python/1.0 KiroIDE-hermes"
-        request = urllib.request.Request(f"https://runtime.{creds.api_region}.kiro.dev/generateAssistantResponse", data=json.dumps(body).encode(), method="POST", headers={"Authorization": f"Bearer {creds.access_token}", "Content-Type": "application/x-amz-json-1.0", "Accept": "application/vnd.amazon.eventstream", "x-amz-target": "AmazonCodeWhispererStreamingService.GenerateAssistantResponse", "x-amzn-codewhisperer-optout": "true", "x-amzn-kiro-agent-mode": "vibe", "amz-sdk-invocation-id": str(uuid.uuid4()), "amz-sdk-request": "attempt=1; max=2", "User-Agent": ua, "x-amz-user-agent": ua})
-        return urllib.request.urlopen(request, timeout=600)
+        headers = _headers(
+            creds,
+            accept="application/vnd.amazon.eventstream",
+            target="AmazonCodeWhispererStreamingService.GenerateAssistantResponse",
+        )
+        headers["x-amzn-kiro-agent-mode"] = "vibe"
+        return request(
+            "POST",
+            f"https://runtime.{creds.api_region}.kiro.dev/generateAssistantResponse",
+            body=json.dumps(body).encode(),
+            headers=headers,
+            timeout=600,
+            stream=True,
+        ), creds.access_token
 
     def _events(self, body: dict) -> Iterator[tuple[str, dict]]:
         response = None
+        stale_access_token = ""
         for attempt in range(2):
             try:
-                response = self._open(body, force_refresh=attempt == 1)
+                opened = self._open(body, force_refresh=attempt == 1, stale_access_token=stale_access_token)
+                response, stale_access_token = opened if isinstance(opened, tuple) else (opened, "")
                 break
-            except urllib.error.HTTPError as exc:
-                if exc.code not in (401, 403) or attempt:
-                    raise KiroAuthError(f"Kiro runtime failed ({exc.code}): {exc.read().decode('utf-8', 'replace')[:500]}") from exc
+            except KiroHTTPError as exc:
+                if exc.status not in (401, 403) or attempt:
+                    raise KiroAuthError(f"Kiro runtime failed ({exc.status}): {exc.body.decode('utf-8', 'replace')[:500]}") from exc
         if response is None:
             raise KiroAuthError("Kiro runtime could not be reached")
         buffer = EventStreamBuffer()
-        with response:
+        try:
             while raw := response.read(8192):
                 buffer.add_data(raw)
                 while True:
@@ -156,6 +225,10 @@ class KiroClient:
                         payload = {}
                     if isinstance(payload, dict):
                         yield str(event.headers.get(":event-type") or ""), payload
+        finally:
+            release = getattr(response, "release_conn", None)
+            if release:
+                release()
 
     def _create(self, *, model: str, messages: list[dict], stream: bool = False, tools: Any = None, extra_body: dict | None = None, **_: Any):
         effort = (extra_body or {}).get("reasoning")

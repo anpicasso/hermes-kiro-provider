@@ -7,13 +7,13 @@ import os
 import sys
 import tempfile
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from threading import Lock
 from typing import Any
+
+from transport import KiroHTTPError, request_json
 
 _API_REGIONS = {"us-east-1", "eu-central-1"}
 _REGION_MAP = {
@@ -90,19 +90,17 @@ def _endpoint(region: str, path: str) -> str:
 
 
 def _post(region: str, path: str, payload: dict[str, Any]) -> dict[str, Any]:
-    body = json.dumps(payload).encode()
-    request = urllib.request.Request(_endpoint(region, path), data=body, method="POST", headers={"Content-Type": "application/json", "Accept": "application/json"})
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            data = json.loads(response.read() or b"{}")
-    except urllib.error.HTTPError as exc:
-        text = exc.read().decode("utf-8", "replace")[:500]
-        raise KiroAuthError(f"AWS OIDC {path} failed ({exc.code}): {text}") from exc
-    except urllib.error.URLError as exc:
-        raise KiroAuthError(f"AWS OIDC {path} is unreachable: {exc.reason}") from exc
-    if not isinstance(data, dict):
-        raise KiroAuthError(f"AWS OIDC {path} returned malformed JSON")
-    return data
+        return request_json(
+            "POST",
+            _endpoint(region, path),
+            body=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+        )
+    except KiroHTTPError as exc:
+        raise KiroAuthError(f"AWS OIDC {path} failed ({exc.status}): {exc.body.decode('utf-8', 'replace')[:500]}") from exc
+    except Exception as exc:
+        raise KiroAuthError(f"AWS OIDC {path} is unreachable: {exc}") from exc
 
 
 def _write(creds: Credentials) -> None:
@@ -144,6 +142,26 @@ def _enable_provider() -> None:
             if existing and not existing.endswith("\n"):
                 handle.write("\n")
             handle.write(line + "\n")
+
+
+def _disable_provider() -> None:
+    env = hermes_home() / ".env"
+    if not env.exists():
+        return
+    kept = [row for row in env.read_text().splitlines() if row != "KIRO_AUTH=kiro-oauth-local"]
+    env.write_text("\n".join(kept) + ("\n" if kept else ""))
+
+
+def logout() -> bool:
+    """Forget only Hermes' native Kiro credentials and sentinel."""
+    global _CACHED
+    with _LOCK:
+        target = credential_path()
+        existed = target.exists()
+        target.unlink(missing_ok=True)
+        _CACHED = None
+        _disable_provider()
+        return existed
 
 
 def login(start_url: str = BUILDER_ID_START_URL, region: str = "us-east-1") -> tuple[str, str]:
@@ -249,12 +267,15 @@ def prompt_login_inputs(start_url: str | None, region: str | None, input_fn=inpu
     return start_url, region
 
 
-def get_credentials(force_refresh: bool = False) -> Credentials:
+def get_credentials(force_refresh: bool = False, stale_access_token: str = "") -> Credentials:
+    """Return a valid token; concurrent stale requests refresh it once."""
     global _CACHED
     with _LOCK:
         creds = _CACHED or _read()
         if creds.client_secret_expires_at and time.time() >= creds.client_secret_expires_at:
             raise KiroAuthError("Kiro client registration expired; run login again")
+        if force_refresh and stale_access_token and creds.access_token != stale_access_token:
+            return creds
         if not force_refresh and not creds.expiring:
             _CACHED = creds
             return creds

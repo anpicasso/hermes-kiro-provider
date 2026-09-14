@@ -4,6 +4,7 @@ import json
 import sys
 import asyncio
 import struct
+import threading
 import time
 import zlib
 from pathlib import Path
@@ -14,6 +15,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parents[1] / "provider"))
 
 import client
+import credentials
 from credentials import BUILDER_ID_START_URL, KiroAuthError, _next_login_choice, prompt_login_inputs, runtime_region, validate_start_url
 from translate import build_request
 
@@ -105,9 +107,9 @@ def test_builder_id_request_omits_profile_arn(monkeypatch):
     captured = {}
     creds = SimpleNamespace(api_region="us-east-1", access_token="token", profile_arn="", is_builder_id=True)
     monkeypatch.setattr(client, "get_credentials", lambda **_: creds)
-    monkeypatch.setattr(client.urllib.request, "urlopen", lambda request, timeout: captured.setdefault("request", request))
+    monkeypatch.setattr(client, "request", lambda method, url, **kwargs: captured.update(method=method, url=url, **kwargs) or SimpleNamespace())
     instance._open({"conversationState": {}})
-    assert "profileArn" not in json.loads(captured["request"].data)
+    assert "profileArn" not in json.loads(captured["body"])
 
 
 def test_idc_discovers_profile_arn_without_prompting(monkeypatch):
@@ -118,10 +120,51 @@ def test_idc_discovers_profile_arn_without_prompting(monkeypatch):
     monkeypatch.setattr(client, "get_credentials", lambda **_: creds)
     monkeypatch.setattr(client, "save_credentials", lambda _: None)
     monkeypatch.setattr(client, "_management", lambda *_: calls.append(True) or {"profiles": [{"arn": "arn:aws:codewhisperer:us-east-1:1:profile/team"}]})
-    monkeypatch.setattr(client.urllib.request, "urlopen", lambda request, timeout: captured.setdefault("request", request))
+    monkeypatch.setattr(client, "request", lambda method, url, **kwargs: captured.update(method=method, url=url, **kwargs) or SimpleNamespace())
     instance._open({"conversationState": {}})
     assert calls and creds.profile_arn.endswith("profile/team")
-    assert json.loads(captured["request"].data)["profileArn"] == creds.profile_arn
+    assert json.loads(captured["body"])["profileArn"] == creds.profile_arn
+
+
+def test_builder_id_uses_live_bare_model_catalog_and_usage(monkeypatch):
+    creds = SimpleNamespace(api_region="us-east-1", access_token="token", profile_arn="", is_builder_id=True)
+    calls = []
+    monkeypatch.setattr(client, "get_credentials", lambda **_: creds)
+    monkeypatch.setattr(client, "_rest", lambda _creds, path, query: calls.append((path, query)) or ({"models": [{"modelId": "live-model"}]} if path == "ListAvailableModels" else {"usageBreakdownList": [{"usageType": "Agent", "currentUsage": 3, "usageLimit": 10}]}))
+    assert client.list_model_ids() == ["live-model"]
+    assert client.get_usage_limits()["usageBreakdownList"][0]["currentUsage"] == 3
+    assert calls == [
+        ("ListAvailableModels", {"origin": "AI_EDITOR", "maxResults": "50"}),
+        ("getUsageLimits", {"isEmailRequired": "true", "origin": "AI_EDITOR", "resourceType": "AGENTIC_REQUEST"}),
+    ]
+    assert "3/10 (30%)" in client.format_usage({"usageBreakdownList": [{"usageType": "Agent", "currentUsage": 3, "usageLimit": 10}]})
+
+
+def test_refresh_is_single_flight_for_concurrent_expired_requests(monkeypatch):
+    creds = credentials.Credentials("old", "refresh", "id", "secret", "us-east-1", BUILDER_ID_START_URL, 0)
+    calls = []
+    monkeypatch.setattr(credentials, "_CACHED", None)
+    monkeypatch.setattr(credentials, "_read", lambda: creds)
+    monkeypatch.setattr(credentials, "save_credentials", lambda value: None)
+    monkeypatch.setattr(credentials, "_post", lambda *_: calls.append(True) or {"accessToken": "new", "expiresIn": 3600})
+    results = []
+    threads = [threading.Thread(target=lambda: results.append(credentials.get_credentials().access_token)) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert calls == [True]
+    assert results == ["new"] * 8
+
+
+def test_logout_removes_only_hermes_kiro_state(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(credentials, "_CACHED", None)
+    (tmp_path / ".env").write_text("OTHER=value\nKIRO_AUTH=kiro-oauth-local\n")
+    credentials._write(credentials.Credentials("a", "r", "id", "secret", "us-east-1", BUILDER_ID_START_URL, time.time() + 60))
+    assert credentials.logout() is True
+    assert not credentials.credential_path().exists()
+    assert (tmp_path / ".env").read_text() == "OTHER=value\n"
 
 
 def test_tool_calls_round_trip_and_nonstream_is_awaitable(monkeypatch):
