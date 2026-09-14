@@ -38,7 +38,7 @@ install_or_update kiro-provider "$SOURCE/provider"
 # Enable only after both component manifests are present and discoverable.
 hermes plugins doctor "$HERMES_HOME_DIR/plugins/kiro" --ci
 hermes plugins doctor "$HERMES_HOME_DIR/plugins/kiro-provider" --ci
-hermes plugins enable kiro
+hermes plugins enable kiro --no-allow-tool-override
 
 cat <<'EOF'
 
