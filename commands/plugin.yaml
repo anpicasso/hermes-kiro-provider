@@ -1,5 +1,5 @@
 name: kiro
-version: 0.1.4
+version: 0.1.5
 description: Kiro IAM Identity Center login and status commands.
 author: anpicasso
 kind: standalone

@@ -54,9 +54,12 @@ hermes profile use kaito
 curl -fsSL https://raw.githubusercontent.com/anpicasso/hermes-plugin-kiro/main/install.sh | bash
 hermes kiro login
 
-# Or target a profile explicitly without changing the active profile.
-curl -fsSL https://raw.githubusercontent.com/anpicasso/hermes-plugin-kiro/main/install.sh | HERMES_HOME="$HOME/.hermes/profiles/kaito" bash
+# Or target any profile explicitly without changing the active profile.
+curl -fsSL https://raw.githubusercontent.com/anpicasso/hermes-plugin-kiro/main/install.sh | HERMES_PROFILE=kaito bash
 hermes kiro login --profile kaito
+
+# `default` is the Yuqi/default profile, even while another profile is active.
+curl -fsSL https://raw.githubusercontent.com/anpicasso/hermes-plugin-kiro/main/install.sh | HERMES_PROFILE=default bash
 ```
 
 - A new terminal can immediately run `hermes kiro login`.
