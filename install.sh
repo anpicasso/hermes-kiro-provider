@@ -23,17 +23,14 @@ if ! command -v hermes >/dev/null 2>&1; then
   exit 1
 fi
 
-install_or_update() {
-  local name="$1" source="$2"
-  if [ -d "$HERMES_HOME_DIR/plugins/$name" ]; then
-    hermes plugins update "$name"
-  else
-    hermes plugins install "$source" --no-enable
-  fi
+install_component() {
+  local source="$1"
+  # Hermes installs portable snapshots, so `plugins update` cannot update them.
+  hermes plugins install "$source" --force --no-enable
 }
 
-install_or_update kiro "$SOURCE/commands"
-install_or_update kiro-provider "$SOURCE/provider"
+install_component "$SOURCE/commands"
+install_component "$SOURCE/provider"
 
 # Enable only after both component manifests are present and discoverable.
 hermes plugins doctor "$HERMES_HOME_DIR/plugins/kiro" --ci
