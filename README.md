@@ -12,10 +12,11 @@ Native Kiro model-provider plugin for Hermes. It talks directly to Kiro over HTT
 ## Install locally
 
 ```bash
-mkdir -p ~/.hermes/plugins/model-providers
-cp -R provider ~/.hermes/plugins/model-providers/kiro
-python ~/.hermes/plugins/model-providers/kiro/credentials.py login \
-  --start-url 'https://YOUR-START-URL.awsapps.com/start' --region us-east-1
+mkdir -p ~/.hermes/plugins
+cp -R commands ~/.hermes/plugins/kiro
+cp -R provider ~/.hermes/plugins/kiro-provider
+hermes plugins enable kiro
+hermes kiro login --start-url 'https://YOUR-START-URL.awsapps.com/start' --region us-east-1
 # Restart Hermes, then choose provider `kiro`.
 ```
 
