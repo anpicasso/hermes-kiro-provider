@@ -1,4 +1,4 @@
-# hermes-kiro
+# hermes-plugin-kiro
 
 Native Kiro model-provider plugin for Hermes. It connects Hermes directly to Kiro over HTTPS: no local HTTP listener, proxy, daemon, or `kiro-cli` is required.
 
@@ -37,7 +37,7 @@ The model-provider package is loaded for provider discovery, but Hermes does not
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/anpicasso/hermes-kiro/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/anpicasso/hermes-plugin-kiro/main/install.sh | bash
 ```
 
 The installer installs both plugin directories and enables the command plugin. It **does not restart anything**.
@@ -66,8 +66,8 @@ hermes kiro logout
 ## Manual install
 
 ```bash
-hermes plugins install anpicasso/hermes-kiro/commands --no-enable
-hermes plugins install anpicasso/hermes-kiro/provider --no-enable
+hermes plugins install anpicasso/hermes-plugin-kiro/commands --no-enable
+hermes plugins install anpicasso/hermes-plugin-kiro/provider --no-enable
 hermes plugins enable kiro
 ```
 

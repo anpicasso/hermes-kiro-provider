@@ -2,7 +2,7 @@
 # Install both Hermes Kiro plugin surfaces. No gateway restart is performed.
 set -euo pipefail
 
-SOURCE="anpicasso/hermes-kiro"
+SOURCE="anpicasso/hermes-plugin-kiro"
 
 if ! command -v hermes >/dev/null 2>&1; then
   printf '%s\n' 'Hermes CLI was not found in PATH. Install Hermes first.' >&2
