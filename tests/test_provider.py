@@ -157,6 +157,48 @@ def test_refresh_is_single_flight_for_concurrent_expired_requests(monkeypatch):
     assert results == ["new"] * 8
 
 
+def test_concurrent_401_refreshes_once(monkeypatch):
+    creds = credentials.Credentials("old", "refresh", "id", "secret", "us-east-1", BUILDER_ID_START_URL, time.time() + 3600)
+    barrier = threading.Barrier(2)
+    refreshes, retried, errors = [], [], []
+
+    class Response:
+        def read(self, _):
+            return b""
+        def release_conn(self):
+            return None
+
+    def fake_request(*_, headers, **__):
+        token = headers["Authorization"]
+        if token == "Bearer old":
+            barrier.wait(timeout=2)
+            raise client.KiroHTTPError(401, b"expired")
+        retried.append(token)
+        return Response()
+
+    monkeypatch.setattr(credentials, "_CACHED", None)
+    monkeypatch.setattr(credentials, "_read", lambda: creds)
+    monkeypatch.setattr(credentials, "save_credentials", lambda value: None)
+    monkeypatch.setattr(credentials, "_post", lambda *_: refreshes.append(True) or {"accessToken": "new", "expiresIn": 3600})
+    monkeypatch.setattr(client, "get_credentials", credentials.get_credentials)
+    monkeypatch.setattr(client, "request", fake_request)
+
+    def run():
+        try:
+            list(client.KiroClient()._events({"conversationState": {}}))
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=run) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert not errors
+    assert refreshes == [True]
+    assert retried == ["Bearer new", "Bearer new"]
+
+
 def test_logout_removes_only_hermes_kiro_state(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.setattr(credentials, "_CACHED", None)

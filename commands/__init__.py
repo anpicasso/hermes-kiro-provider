@@ -55,7 +55,10 @@ def handle_kiro(args) -> None:
 
 
 def handle_kiro_slash(raw_args: str) -> str:
-    parts = shlex.split(raw_args or "")
+    try:
+        parts = shlex.split(raw_args or "")
+    except ValueError as exc:
+        return f"Invalid Kiro command: {exc}"
     if parts[:1] == ["status"]:
         try:
             get_credentials, *_ = _kiro()

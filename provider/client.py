@@ -186,14 +186,20 @@ class KiroClient:
             target="AmazonCodeWhispererStreamingService.GenerateAssistantResponse",
         )
         headers["x-amzn-kiro-agent-mode"] = "vibe"
-        return request(
-            "POST",
-            f"https://runtime.{creds.api_region}.kiro.dev/generateAssistantResponse",
-            body=json.dumps(body).encode(),
-            headers=headers,
-            timeout=600,
-            stream=True,
-        ), creds.access_token
+        used_access_token = creds.access_token
+        try:
+            response = request(
+                "POST",
+                f"https://runtime.{creds.api_region}.kiro.dev/generateAssistantResponse",
+                body=json.dumps(body).encode(),
+                headers=headers,
+                timeout=600,
+                stream=True,
+            )
+        except KiroHTTPError as exc:
+            exc.access_token = used_access_token
+            raise
+        return response, creds.access_token
 
     def _events(self, body: dict) -> Iterator[tuple[str, dict]]:
         response = None
@@ -206,6 +212,7 @@ class KiroClient:
             except KiroHTTPError as exc:
                 if exc.status not in (401, 403) or attempt:
                     raise KiroAuthError(f"Kiro runtime failed ({exc.status}): {exc.body.decode('utf-8', 'replace')[:500]}") from exc
+                stale_access_token = exc.access_token
         if response is None:
             raise KiroAuthError("Kiro runtime could not be reached")
         buffer = EventStreamBuffer()

@@ -16,6 +16,7 @@ class KiroHTTPError(RuntimeError):
     def __init__(self, status: int, body: bytes) -> None:
         self.status = status
         self.body = body
+        self.access_token = ""
         super().__init__(f"HTTP {status}: {body.decode('utf-8', 'replace')[:500]}")
 
 
