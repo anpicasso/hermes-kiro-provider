@@ -3,24 +3,37 @@
 set -euo pipefail
 
 SOURCE="anpicasso/hermes-plugin-kiro"
-HERMES_HOME_DIR="${HERMES_HOME:-$HOME/.hermes}"
+HERMES_ROOT="${HERMES_HOME:-$HOME/.hermes}"
+HERMES_HOME_DIR="$HERMES_ROOT"
+# Match Hermes: an explicit profile directory wins; otherwise use active_profile.
+if { [ -z "${HERMES_HOME:-}" ] || [ "$(basename "$(dirname "$HERMES_HOME")")" != "profiles" ]; } && [ -f "$HERMES_ROOT/active_profile" ]; then
+  profile="$(tr -d '\r\n' < "$HERMES_ROOT/active_profile")"
+  if ! printf '%s' "$profile" | grep -Eq '^(default|[a-z0-9][a-z0-9_-]{0,63})$'; then
+    printf '%s\n' "Invalid active Hermes profile: $profile" >&2
+    exit 1
+  fi
+  if [ "$profile" != "default" ]; then
+    HERMES_HOME_DIR="$HERMES_ROOT/profiles/$profile"
+  fi
+fi
+export HERMES_HOME="$HERMES_HOME_DIR"
 
 if ! command -v hermes >/dev/null 2>&1; then
   printf '%s\n' 'Hermes CLI was not found in PATH. Install Hermes first.' >&2
   exit 1
 fi
 
-install_if_missing() {
+install_or_update() {
   local name="$1" source="$2"
   if [ -d "$HERMES_HOME_DIR/plugins/$name" ]; then
-    printf '%s\n' "Kiro component '$name' is already installed."
+    hermes plugins update "$name"
   else
     hermes plugins install "$source" --no-enable
   fi
 }
 
-install_if_missing kiro "$SOURCE/commands"
-install_if_missing kiro-provider "$SOURCE/provider"
+install_or_update kiro "$SOURCE/commands"
+install_or_update kiro-provider "$SOURCE/provider"
 
 # Enable only after both component manifests are present and discoverable.
 hermes plugins doctor "$HERMES_HOME_DIR/plugins/kiro" --ci

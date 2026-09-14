@@ -164,7 +164,7 @@ def test_builder_id_uses_live_bare_model_catalog_and_usage(monkeypatch):
 def test_refresh_is_single_flight_for_concurrent_expired_requests(monkeypatch):
     creds = credentials.Credentials("old", "refresh", "id", "secret", "us-east-1", BUILDER_ID_START_URL, 0)
     calls = []
-    monkeypatch.setattr(credentials, "_CACHED", None)
+    monkeypatch.setattr(credentials, "_CACHED", {})
     monkeypatch.setattr(credentials, "_read", lambda: creds)
     monkeypatch.setattr(credentials, "save_credentials", lambda value: None)
     monkeypatch.setattr(credentials, "_post", lambda *_: calls.append(True) or {"accessToken": "new", "expiresIn": 3600})
@@ -197,7 +197,7 @@ def test_concurrent_401_refreshes_once(monkeypatch):
         retried.append(token)
         return Response()
 
-    monkeypatch.setattr(credentials, "_CACHED", None)
+    monkeypatch.setattr(credentials, "_CACHED", {})
     monkeypatch.setattr(credentials, "_read", lambda: creds)
     monkeypatch.setattr(credentials, "save_credentials", lambda value: None)
     monkeypatch.setattr(credentials, "_post", lambda *_: refreshes.append(True) or {"accessToken": "new", "expiresIn": 3600})
@@ -220,9 +220,30 @@ def test_concurrent_401_refreshes_once(monkeypatch):
     assert retried == ["Bearer new", "Bearer new"]
 
 
+
+def test_credentials_and_cache_follow_hermes_profile_context(monkeypatch, tmp_path):
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    monkeypatch.setattr(credentials, "_CACHED", {})
+    kaito = tmp_path / "profiles" / "kaito"
+    mega = tmp_path / "profiles" / "mega"
+    token_kaito = set_hermes_home_override(kaito)
+    try:
+        credentials.save_credentials(credentials.Credentials("kaito-token", "r", "id", "secret", "us-east-1", BUILDER_ID_START_URL, time.time() + 3600))
+        assert credentials.credential_path() == kaito / "kiro" / "credentials.json"
+        token_mega = set_hermes_home_override(mega)
+        try:
+            credentials.save_credentials(credentials.Credentials("mega-token", "r", "id", "secret", "us-east-1", BUILDER_ID_START_URL, time.time() + 3600))
+            assert credentials.get_credentials().access_token == "mega-token"
+        finally:
+            reset_hermes_home_override(token_mega)
+        assert credentials.get_credentials().access_token == "kaito-token"
+    finally:
+        reset_hermes_home_override(token_kaito)
+
 def test_logout_removes_only_hermes_kiro_state(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    monkeypatch.setattr(credentials, "_CACHED", None)
+    monkeypatch.setattr(credentials, "_CACHED", {})
     (tmp_path / ".env").write_text("OTHER=value\nKIRO_AUTH=kiro-oauth-local\n")
     credentials._write(credentials.Credentials("a", "r", "id", "secret", "us-east-1", BUILDER_ID_START_URL, time.time() + 60))
     assert credentials.logout() is True

@@ -6,7 +6,7 @@ Native Kiro model-provider plugin for Hermes. It connects Hermes directly to Kir
 
 - **Direct transport:** Hermes streams Kiro responses over one shared HTTPS connection pool, including concurrent conversations.
 - **No local service:** nothing listens on a loopback port, no helper binary is downloaded, and no daemon has to be supervised.
-- **Native Kiro auth:** AWS Builder ID or IAM Identity Center device authorization stores only the Kiro OIDC registration and tokens under `$HERMES_HOME/kiro/credentials.json` (directory `0700`, file `0600`). Tokens refresh automatically.
+- **Native Kiro auth:** AWS Builder ID or IAM Identity Center device authorization stores only the Kiro OIDC registration and tokens under `$HERMES_HOME/kiro/credentials.json` (directory `0700`, file `0600`). Credentials and refreshes follow the active Hermes profile. Tokens refresh automatically.
 - **Kiro-aware runtime:** live model catalog, Kiro event-stream framing, tool calls/results, and Kiro usage limits are handled by the provider client.
 
 ## Architecture
@@ -42,7 +42,22 @@ The model-provider package is loaded for provider discovery, but Hermes does not
 curl -fsSL https://raw.githubusercontent.com/anpicasso/hermes-plugin-kiro/main/install.sh | bash
 ```
 
-The installer installs both plugin directories and enables the command plugin. It **does not restart anything**.
+The installer installs or updates both plugin directories and enables the command plugin **for one Hermes profile**. It uses the active profile (`hermes profile use <name>`); if `HERMES_HOME` is set, that explicit profile home wins. It **does not restart anything**.
+
+### Profiles
+
+Plugins live under each profile's `$HERMES_HOME/plugins`, so install them once in every profile that will use Kiro. Each profile then has its own `$HERMES_HOME/kiro/credentials.json`; logging into one never shares its Kiro account with another.
+
+```bash
+# Install and log in for the active profile.
+hermes profile use kaito
+curl -fsSL https://raw.githubusercontent.com/anpicasso/hermes-plugin-kiro/main/install.sh | bash
+hermes kiro login
+
+# Or target a profile explicitly without changing the active profile.
+curl -fsSL https://raw.githubusercontent.com/anpicasso/hermes-plugin-kiro/main/install.sh | HERMES_HOME="$HOME/.hermes/profiles/kaito" bash
+hermes kiro login --profile kaito
+```
 
 - A new terminal can immediately run `hermes kiro login`.
 - Restart an already-running Hermes gateway once so it imports the newly installed provider:

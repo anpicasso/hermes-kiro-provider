@@ -13,6 +13,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
+from hermes_constants import get_hermes_home
 from transport import KiroHTTPError, request_json
 
 _API_REGIONS = {"us-east-1", "eu-central-1"}
@@ -25,7 +26,7 @@ _SCOPES = ["codewhisperer:completions", "codewhisperer:analysis", "codewhisperer
 _GRANTS = ["urn:ietf:params:oauth:grant-type:device_code", "refresh_token"]
 BUILDER_ID_START_URL = "https://view.awsapps.com/start"
 _LOCK = Lock()
-_CACHED: "Credentials | None" = None
+_CACHED: dict[Path, "Credentials"] = {}
 
 
 class KiroAuthError(RuntimeError):
@@ -58,11 +59,20 @@ class Credentials:
 
 
 def hermes_home() -> Path:
-    return Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
+    """Use Hermes' context-local profile home, not only process environment."""
+    return get_hermes_home()
 
 
 def credential_path() -> Path:
     return hermes_home() / "kiro" / "credentials.json"
+
+
+def _cached() -> Credentials | None:
+    return _CACHED.get(credential_path())
+
+
+def _cache(creds: Credentials) -> None:
+    _CACHED[credential_path()] = creds
 
 
 def runtime_region(region: str) -> str:
@@ -121,7 +131,7 @@ def _write(creds: Credentials) -> None:
 def save_credentials(creds: Credentials) -> None:
     """Persist a token or IdC profile update made by the native transport."""
     global _CACHED
-    _CACHED = creds
+    _cache(creds)
     _write(creds)
 
 
@@ -159,7 +169,7 @@ def logout() -> bool:
         target = credential_path()
         existed = target.exists()
         target.unlink(missing_ok=True)
-        _CACHED = None
+        _CACHED.pop(target, None)
         _disable_provider()
         return existed
 
@@ -196,8 +206,7 @@ def login(start_url: str = BUILDER_ID_START_URL, region: str = "us-east-1") -> t
         access, refresh = token.get("accessToken"), token.get("refreshToken")
         if not access or not refresh:
             raise KiroAuthError("AWS OIDC token response omitted access or refresh token")
-        _CACHED = Credentials(access, refresh, client_id, client_secret, region, start_url, time.time() + float(token.get("expiresIn") or 3600), float(registration.get("clientSecretExpiresAt") or 0))
-        _write(_CACHED)
+        save_credentials(Credentials(access, refresh, client_id, client_secret, region, start_url, time.time() + float(token.get("expiresIn") or 3600), float(registration.get("clientSecretExpiresAt") or 0)))
         _enable_provider()
         return str(uri), str(user_code)
     raise KiroAuthError("Device authorization expired; run login again")
@@ -271,13 +280,13 @@ def get_credentials(force_refresh: bool = False, stale_access_token: str = "") -
     """Return a valid token; concurrent stale requests refresh it once."""
     global _CACHED
     with _LOCK:
-        creds = _CACHED or _read()
+        creds = _cached() or _read()
         if creds.client_secret_expires_at and time.time() >= creds.client_secret_expires_at:
             raise KiroAuthError("Kiro client registration expired; run login again")
         if force_refresh and stale_access_token and creds.access_token != stale_access_token:
             return creds
         if not force_refresh and not creds.expiring:
-            _CACHED = creds
+            _cache(creds)
             return creds
         token = _post(creds.region, "token", {"clientId": creds.client_id, "clientSecret": creds.client_secret, "grantType": "refresh_token", "refreshToken": creds.refresh_token})
         access = token.get("accessToken")
