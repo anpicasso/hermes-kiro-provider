@@ -474,3 +474,120 @@ def test_compatible_models_keep_reasoning_fields(monkeypatch, tmp_path):
         assert capabilities.additional_model_request_fields_supported("compatible-model") is True
     finally:
         reset_hermes_home_override(token)
+
+
+@pytest.mark.parametrize("payload", [
+    {"additionalModelRequestFieldsUnsupportedModels": 42},
+    {"additionalModelRequestFieldsUnsupportedModels": "not-a-list"},
+    {"additionalModelRequestFieldsUnsupportedModels": ["valid", 42]},
+    ["not-an-object"],
+])
+def test_invalid_capability_cache_schema_is_empty(payload, tmp_path):
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    import capabilities
+
+    token = set_hermes_home_override(tmp_path / "profile")
+    try:
+        cache_file = credentials.credential_path().parent / "model-capabilities.json"
+        cache_file.parent.mkdir(parents=True)
+        cache_file.write_text(json.dumps(payload))
+        assert capabilities.additional_model_request_fields_supported("valid") is True
+    finally:
+        reset_hermes_home_override(token)
+
+
+def test_capability_cache_hits_memory_and_invalidates_external_changes(monkeypatch, tmp_path):
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    import capabilities
+
+    token = set_hermes_home_override(tmp_path / "profile")
+    try:
+        cache_file = credentials.credential_path().parent / "model-capabilities.json"
+        cache_file.parent.mkdir(parents=True)
+        cache_file.write_text(json.dumps({"additionalModelRequestFieldsUnsupportedModels": ["first"]}))
+        reads = []
+        original_read_text = capabilities.Path.read_text
+
+        def spy_read_text(path, *args, **kwargs):
+            if path == cache_file:
+                reads.append(path)
+            return original_read_text(path, *args, **kwargs)
+
+        monkeypatch.setattr(capabilities.Path, "read_text", spy_read_text)
+        assert capabilities.additional_model_request_fields_supported("first") is False
+        assert capabilities.additional_model_request_fields_supported("first") is False
+        assert len(reads) == 1
+
+        replacement = cache_file.with_suffix(".replacement")
+        replacement.write_text(json.dumps({"additionalModelRequestFieldsUnsupportedModels": ["second"]}))
+        replacement.replace(cache_file)
+        assert capabilities.additional_model_request_fields_supported("first") is True
+        assert capabilities.additional_model_request_fields_supported("second") is False
+        cache_file.unlink()
+        assert capabilities.additional_model_request_fields_supported("second") is True
+    finally:
+        reset_hermes_home_override(token)
+
+
+@pytest.mark.parametrize("failure", ["read", "stat", "write"])
+def test_cache_io_failures_do_not_abort_capability_fallback(monkeypatch, tmp_path, failure):
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    import capabilities
+
+    token = set_hermes_home_override(tmp_path / "profile")
+    try:
+        instance = client.KiroClient()
+        bodies = []
+
+        def fake_open(body, **_):
+            bodies.append(json.loads(json.dumps(body)))
+            if len(bodies) == 1:
+                raise client.KiroHTTPError(400, json.dumps({
+                    "reason": "REQUEST_BODY_INVALID",
+                    "message": "additionalModelRequestFields is not supported for this model",
+                }).encode())
+            return SimpleNamespace(read=lambda _: b"", release_conn=lambda: None)
+
+        monkeypatch.setattr(instance, "_open", fake_open)
+        if failure == "read":
+            monkeypatch.setattr(capabilities.Path, "read_text", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("read failed")))
+        elif failure == "stat":
+            monkeypatch.setattr(capabilities.Path, "stat", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("stat failed")))
+        else:
+            monkeypatch.setattr(capabilities, "_atomic_write", lambda *_args: (_ for _ in ()).throw(OSError("write failed")))
+
+        body = build_request([{"role": "user", "content": "hi"}], [], "failed-cache-model", {"reasoningEffort": "high"})
+        assert list(instance._events(body)) == []
+        assert len(bodies) == 2
+        assert "additionalModelRequestFields" not in bodies[1]
+        assert client.additional_model_request_fields_supported("failed-cache-model") is False
+    finally:
+        reset_hermes_home_override(token)
+
+
+def test_concurrent_capability_updates_keep_all_models(monkeypatch, tmp_path):
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    import capabilities
+
+    token = set_hermes_home_override(tmp_path / "profile")
+    try:
+        cache_file = tmp_path / "concurrent" / "model-capabilities.json"
+        monkeypatch.setattr(capabilities, "_cache_path", lambda: cache_file)
+        barrier = threading.Barrier(2)
+
+        def mark(model):
+            barrier.wait()
+            capabilities.mark_additional_model_request_fields_unsupported(model)
+
+        threads = [threading.Thread(target=mark, args=(model,)) for model in ("one", "two")]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert set(json.loads(cache_file.read_text())["additionalModelRequestFieldsUnsupportedModels"]) == {"one", "two"}
+    finally:
+        reset_hermes_home_override(token)
