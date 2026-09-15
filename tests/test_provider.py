@@ -337,3 +337,140 @@ def test_parallel_tool_results_share_one_user_turn():
     assert len(state["history"]) == 2
     assert [item["text"] for item in state["currentMessage"]["userInputMessage"]["userInputMessageContext"]["toolResults"][0]["content"]] == ["x"]
     assert len(state["currentMessage"]["userInputMessage"]["userInputMessageContext"]["toolResults"]) == 2
+
+
+def test_unsupported_additional_fields_are_cached_and_retried_once(monkeypatch, tmp_path):
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    import capabilities
+
+    token = set_hermes_home_override(tmp_path / "profile")
+    try:
+        instance = client.KiroClient()
+        bodies = []
+
+        def fake_open(body, **_):
+            bodies.append(json.loads(json.dumps(body)))
+            if len(bodies) == 1:
+                raise client.KiroHTTPError(400, json.dumps({
+                    "reason": "REQUEST_BODY_INVALID",
+                    "message": "additionalModelRequestFields is not supported for this model",
+                }).encode())
+            return SimpleNamespace(read=lambda _: b"", release_conn=lambda: None)
+
+        monkeypatch.setattr(instance, "_open", fake_open)
+        body = build_request([{"role": "user", "content": "hi"}], [], "minimax-m2.5", {"reasoningEffort": "high"})
+        assert list(instance._events(body)) == []
+        assert "additionalModelRequestFields" in bodies[0]
+        assert "additionalModelRequestFields" not in bodies[1]
+        assert capabilities.additional_model_request_fields_supported("minimax-m2.5") is False
+    finally:
+        reset_hermes_home_override(token)
+
+
+def test_cached_model_omits_additional_fields_for_sync_async_and_stream(monkeypatch, tmp_path):
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    import capabilities
+
+    token = set_hermes_home_override(tmp_path / "profile")
+    try:
+        capabilities.mark_additional_model_request_fields_unsupported("minimax-m2.5")
+        instance = client.KiroClient()
+        bodies = []
+
+        def fake_events(body):
+            bodies.append(body)
+            yield "assistantResponseEvent", {"content": "OK"}
+
+        monkeypatch.setattr(instance, "_events", fake_events)
+        kwargs = {
+            "model": "minimax-m2.5",
+            "messages": [{"role": "user", "content": "hi"}],
+            "extra_body": {"reasoning": {"reasoningEffort": "high"}},
+        }
+        assert instance.chat.completions.create(**kwargs).choices[0].message.content == "OK"
+
+        async def nonstream():
+            return await instance.chat.completions.create(**kwargs)
+
+        assert asyncio.run(nonstream()).choices[0].message.content == "OK"
+        assert list(instance.chat.completions.create(**kwargs, stream=True))[-1].choices[0].finish_reason == "stop"
+        assert all("additionalModelRequestFields" not in body for body in bodies)
+    finally:
+        reset_hermes_home_override(token)
+
+
+def test_capability_cache_persists_across_module_restart_and_profiles(monkeypatch, tmp_path):
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    import capabilities
+
+    alpha = tmp_path / "profiles" / "alpha"
+    beta = tmp_path / "profiles" / "beta"
+    alpha_token = set_hermes_home_override(alpha)
+    try:
+        capabilities.mark_additional_model_request_fields_unsupported("minimax-m2.5")
+        cache_file = credentials.credential_path().parent / "model-capabilities.json"
+        assert cache_file.exists()
+        assert "minimax-m2.5" in cache_file.read_text()
+        del sys.modules["capabilities"]
+        import capabilities as restarted_capabilities
+        assert restarted_capabilities.additional_model_request_fields_supported("minimax-m2.5") is False
+
+        beta_token = set_hermes_home_override(beta)
+        try:
+            assert restarted_capabilities.additional_model_request_fields_supported("minimax-m2.5") is True
+        finally:
+            reset_hermes_home_override(beta_token)
+        assert restarted_capabilities.additional_model_request_fields_supported("minimax-m2.5") is False
+    finally:
+        reset_hermes_home_override(alpha_token)
+
+
+def test_unrelated_400_is_not_cached_or_retried(monkeypatch, tmp_path):
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    import capabilities
+
+    token = set_hermes_home_override(tmp_path / "profile")
+    try:
+        instance = client.KiroClient()
+        bodies = []
+
+        def fake_open(body, **_):
+            bodies.append(json.loads(json.dumps(body)))
+            raise client.KiroHTTPError(400, b'{"reason":"REQUEST_BODY_INVALID","message":"tool schema is invalid"}')
+
+        monkeypatch.setattr(instance, "_open", fake_open)
+        body = build_request([{"role": "user", "content": "hi"}], [], "compatible-model", {"reasoningEffort": "high"})
+        with pytest.raises(KiroAuthError, match="Kiro runtime failed"):
+            list(instance._events(body))
+        assert len(bodies) == 1
+        assert "additionalModelRequestFields" in bodies[0]
+        assert capabilities.additional_model_request_fields_supported("compatible-model") is True
+    finally:
+        reset_hermes_home_override(token)
+
+
+def test_compatible_models_keep_reasoning_fields(monkeypatch, tmp_path):
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    import capabilities
+
+    token = set_hermes_home_override(tmp_path / "profile")
+    try:
+        instance = client.KiroClient()
+        bodies = []
+
+        def fake_open(body, **_):
+            bodies.append(json.loads(json.dumps(body)))
+            return SimpleNamespace(read=lambda _: b"", release_conn=lambda: None)
+
+        monkeypatch.setattr(instance, "_open", fake_open)
+        body = build_request([{"role": "user", "content": "hi"}], [], "compatible-model", {"reasoningEffort": "high"})
+        assert list(instance._events(body)) == []
+        assert "additionalModelRequestFields" in bodies[0]
+        assert capabilities.additional_model_request_fields_supported("compatible-model") is True
+    finally:
+        reset_hermes_home_override(token)

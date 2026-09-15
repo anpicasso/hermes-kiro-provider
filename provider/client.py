@@ -12,12 +12,49 @@ from typing import Any, Iterator
 
 from botocore.eventstream import EventStreamBuffer
 
+from capabilities import (
+    additional_model_request_fields_supported,
+    mark_additional_model_request_fields_unsupported,
+)
 from credentials import KiroAuthError, get_credentials, save_credentials
 from transport import KiroHTTPError, request, request_json
 from translate import build_request
 
 _FALLBACK = ("claude-sonnet-4.5", "claude-haiku-4.5", "gpt-5.6-terra")
 _END = object()
+_UNSUPPORTED_ADDITIONAL_FIELDS = "additionalModelRequestFields is not supported for this model"
+
+
+def _model_id(body: dict) -> str:
+    try:
+        model = body["conversationState"]["currentMessage"]["userInputMessage"]["modelId"]
+    except (KeyError, TypeError):
+        return ""
+    return model if isinstance(model, str) else ""
+
+
+def _rejects_additional_model_request_fields(exc: KiroHTTPError) -> bool:
+    if exc.status != 400:
+        return False
+    try:
+        payload = json.loads(exc.body)
+    except (TypeError, ValueError):
+        return False
+
+    def strings(value: Any) -> Iterator[str]:
+        if isinstance(value, str):
+            yield value
+        elif isinstance(value, dict):
+            for item in value.values():
+                yield from strings(item)
+        elif isinstance(value, list):
+            for item in value:
+                yield from strings(item)
+
+    values = list(strings(payload))
+    return "REQUEST_BODY_INVALID" in values and any(
+        _UNSUPPORTED_ADDITIONAL_FIELDS.casefold() in value.casefold() for value in values
+    )
 
 
 def _headers(creds, *, accept: str = "application/json", target: str = "") -> dict[str, str]:
@@ -231,15 +268,30 @@ class KiroClient:
     def _events(self, body: dict) -> Iterator[tuple[str, dict]]:
         response = None
         stale_access_token = ""
-        for attempt in range(2):
+        retried_auth = False
+        retried_without_additional_fields = False
+        while True:
             try:
-                opened = self._open(body, force_refresh=attempt == 1, stale_access_token=stale_access_token)
+                opened = self._open(body, force_refresh=retried_auth, stale_access_token=stale_access_token)
                 response, stale_access_token = opened if isinstance(opened, tuple) else (opened, "")
                 break
             except KiroHTTPError as exc:
-                if exc.status not in (401, 403) or attempt:
+                if (
+                    not retried_without_additional_fields
+                    and "additionalModelRequestFields" in body
+                    and _rejects_additional_model_request_fields(exc)
+                ):
+                    model = _model_id(body)
+                    if model:
+                        mark_additional_model_request_fields_unsupported(model)
+                    body = dict(body)
+                    body.pop("additionalModelRequestFields", None)
+                    retried_without_additional_fields = True
+                    continue
+                if exc.status not in (401, 403) or retried_auth:
                     raise KiroAuthError(f"Kiro runtime failed ({exc.status}): {exc.body.decode('utf-8', 'replace')[:500]}") from exc
                 stale_access_token = exc.access_token
+                retried_auth = True
         if response is None:
             raise KiroAuthError("Kiro runtime could not be reached")
         buffer = EventStreamBuffer()
@@ -268,6 +320,8 @@ class KiroClient:
         if self._companion_error:
             raise KiroAuthError(self._companion_error)
         effort = (extra_body or {}).get("reasoning")
+        if effort and not additional_model_request_fields_supported(model):
+            effort = None
         body = build_request(messages, tools, model, effort)
         if stream:
             return self._stream(model, body)
