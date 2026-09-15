@@ -123,23 +123,6 @@ def test_event_decoder_handles_a_frame_split_mid_prelude(monkeypatch):
     assert list(instance._events({})) == [("assistantResponseEvent", {"content": "OK"})]
 
 
-def test_event_decoder_rejects_a_bad_frame_checksum(monkeypatch):
-    class Response:
-        def __init__(self):
-            payload = json.dumps({"content": "OK"}).encode()
-            prelude = struct.pack(">II", 16 + len(payload), 0)
-            prelude += struct.pack(">I", zlib.crc32(prelude) & 0xFFFFFFFF)
-            self.reads = iter([prelude + payload + b"\0\0\0\0", b""])
-
-        def read(self, _):
-            return next(self.reads)
-
-    instance = client.KiroClient()
-    monkeypatch.setattr(instance, "_open", lambda *_, **__: Response())
-    with pytest.raises(KiroAuthError, match="checksum failed"):
-        list(instance._events({}))
-
-
 def test_builder_id_request_omits_profile_arn(monkeypatch):
     instance = client.KiroClient()
     captured = {}

@@ -3,14 +3,14 @@ from __future__ import annotations
 
 import asyncio
 import json
-import struct
 import time
 from datetime import datetime, timezone
 import urllib.parse
 import uuid
-import zlib
 from types import SimpleNamespace
 from typing import Any, Iterator
+
+from botocore.eventstream import EventStreamBuffer
 
 from credentials import KiroAuthError, get_credentials, save_credentials
 from transport import KiroHTTPError, request, request_json
@@ -18,58 +18,6 @@ from translate import build_request
 
 _FALLBACK = ("claude-sonnet-4.5", "claude-haiku-4.5", "gpt-5.6-terra")
 _END = object()
-
-
-class EventStreamBuffer:
-    """Small AWS event-stream decoder; keeps the provider dependency-free."""
-
-    def __init__(self) -> None:
-        self._data = bytearray()
-
-    def add_data(self, data: bytes) -> None:
-        self._data.extend(data)
-
-    def next(self) -> SimpleNamespace:
-        if len(self._data) < 12:
-            raise StopIteration
-        total, header_length = struct.unpack(">II", self._data[:8])
-        if total < 16 or header_length > total - 16:
-            raise KiroAuthError("Kiro sent an invalid event-stream frame")
-        if zlib.crc32(self._data[:8]) & 0xFFFFFFFF != struct.unpack(">I", self._data[8:12])[0]:
-            raise KiroAuthError("Kiro event-stream prelude checksum failed")
-        if len(self._data) < total:
-            raise StopIteration
-        frame = bytes(self._data[:total])
-        del self._data[:total]
-        if zlib.crc32(frame[:-4]) & 0xFFFFFFFF != struct.unpack(">I", frame[-4:])[0]:
-            raise KiroAuthError("Kiro event-stream checksum failed")
-
-        headers, position, end = {}, 12, 12 + header_length
-        while position < end:
-            name_length = frame[position]
-            position += 1
-            if position + name_length + 1 > end:
-                raise KiroAuthError("Kiro sent malformed event-stream headers")
-            name = frame[position:position + name_length].decode("utf-8", "replace")
-            position += name_length
-            value_type = frame[position]
-            position += 1
-            fixed_sizes = {0: 0, 1: 0, 2: 1, 3: 2, 4: 4, 5: 8, 8: 8, 9: 16}
-            if value_type in (6, 7):
-                if position + 2 > end:
-                    raise KiroAuthError("Kiro sent malformed event-stream headers")
-                size = struct.unpack(">H", frame[position:position + 2])[0]
-                position += 2
-            elif value_type in fixed_sizes:
-                size = fixed_sizes[value_type]
-            else:
-                raise KiroAuthError("Kiro sent an unsupported event-stream header")
-            if position + size > end:
-                raise KiroAuthError("Kiro sent malformed event-stream headers")
-            value = frame[position:position + size]
-            position += size
-            headers[name] = value.decode("utf-8", "replace") if value_type == 7 else value
-        return SimpleNamespace(headers=headers, payload=frame[end:-4])
 
 
 def _headers(creds, *, accept: str = "application/json", target: str = "") -> dict[str, str]:
