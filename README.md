@@ -58,7 +58,7 @@ hermes kiro login
 curl -fsSL https://raw.githubusercontent.com/anpicasso/hermes-plugin-kiro/main/install.sh | HERMES_PROFILE=kaito bash
 hermes kiro login --profile kaito
 
-# `default` is the Yuqi/default profile, even while another profile is active.
+# Target the default profile explicitly, even while another profile is active.
 curl -fsSL https://raw.githubusercontent.com/anpicasso/hermes-plugin-kiro/main/install.sh | HERMES_PROFILE=default bash
 ```
 
