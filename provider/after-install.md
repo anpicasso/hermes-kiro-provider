@@ -1,10 +1,15 @@
 # Kiro provider installed
 
-This provider requires the `kiro` login-command companion before it accepts model or runtime requests.
+Sign in before selecting the provider:
 
 ```bash
-hermes plugins install anpicasso/hermes-plugin-kiro/commands --no-enable
-hermes plugins enable kiro
+hermes kiro login
 ```
 
-Or run the repository's one-line installer to install and validate both components together.
+Then `hermes kiro status`, `hermes kiro usage`, and `/kiro status` / `/kiro usage` in a session.
+
+If `hermes kiro` is unavailable after a Hermes upgrade, the same commands run standalone:
+
+```bash
+python ~/.hermes/plugins/kiro-provider/commands.py {login|status|usage|logout}
+```

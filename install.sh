@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install both Hermes Kiro plugin surfaces. No gateway restart is performed.
+# Install the Hermes Kiro plugin (provider + its built-in commands). No gateway restart is performed.
 set -euo pipefail
 
 SOURCE="anpicasso/hermes-plugin-kiro"
@@ -47,19 +47,21 @@ if [[ ! "$REF" =~ ^[0-9a-f]{40}$ ]]; then
   exit 1
 fi
 
-install_component() {
-  local source="$1"
-  # Hermes installs portable snapshots, so `plugins update` cannot update them.
-  hermes "${HERMES_ARGS[@]}" plugins install "$source" --ref "$REF" --force --no-enable
-}
+# Hermes installs portable snapshots, so `plugins update` cannot update them.
+hermes "${HERMES_ARGS[@]}" plugins install "$SOURCE/provider" --ref "$REF" --force --no-enable
 
-install_component "$SOURCE/commands"
-install_component "$SOURCE/provider"
+# Remove a leftover companion plugin from earlier releases (now merged into provider/).
+if [ -d "$HERMES_HOME_DIR/plugins/kiro" ]; then
+  printf '%s\n' 'Removing the obsolete `kiro` companion plugin (merged into kiro-provider).'
+  rm -rf "$HERMES_HOME_DIR/plugins/kiro"
+fi
 
-# Enable only after both component manifests are present and discoverable.
-hermes "${HERMES_ARGS[@]}" plugins doctor "$HERMES_HOME_DIR/plugins/kiro" --ci
 hermes "${HERMES_ARGS[@]}" plugins doctor "$HERMES_HOME_DIR/plugins/kiro-provider" --ci
-hermes "${HERMES_ARGS[@]}" plugins enable kiro --no-allow-tool-override
+
+# Remove any legacy plugins.enabled entry for the old companion.
+hermes "${HERMES_ARGS[@]}" config get plugins.enabled 2>/dev/null | grep -q 'kiro$\|kiro"' 2>/dev/null && {
+  printf '%s\n' 'Note: `plugins/kiro` was removed from this install. It was merged into kiro-provider.'
+} || true
 
 cat <<'EOF'
 

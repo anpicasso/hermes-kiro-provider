@@ -13,28 +13,28 @@ Native Kiro model-provider plugin for Hermes. It connects Hermes directly to Kir
 
 ```mermaid
 flowchart LR
-    U[User] --> C[commands plugin\nhermes kiro login / logout / usage]
-    C --> S[$HERMES_HOME/kiro/credentials.json]
-    H[Hermes CLI / Gateway] --> P[kiro-provider\ncustom Hermes client]
+    U[User] --> K[hermes kiro login / logout / usage\n/kiro status /kiro usage]
+    K --> S[$HERMES_HOME/kiro/credentials.json]
+    H[Hermes CLI / Gateway] --> P[kiro-provider\nsingle plugin: provider + commands]
     P --> S
     P --> T[Shared HTTPS pool]
-    T --> K[Kiro HTTPS APIs\nstream · models · usage]
+    T --> Kiro[Kiro HTTPS APIs\nstream · models · usage]
 ```
 
-## Why two plugins
+## Why the provider registers its own commands
 
-Hermes discovers model providers and command plugins through separate native extension paths:
+There is one plugin: `provider/`, `kind: model-provider`. It owns the profile, the client, **and** the `hermes kiro` / `/kiro` command surfaces (`provider/commands.py`).
 
-- **`provider/`** is `kind: model-provider`. It registers Kiro for `/model`, the model picker, CLI, gateway, and auxiliary calls.
-- **`commands/`** is `kind: standalone`. It owns the interactive terminal login and the `hermes kiro` / `/kiro` command surfaces.
+This needs a workaround, and it is worth understanding why. Hermes discovers model providers and command plugins through separate paths, and the command-plugin loader deliberately skips `kind: model-provider` manifests (`hermes_cli/plugins_discovery.py`), so a model-provider's `register(ctx)` never receives a live context — the hook that would normally register `hermes kiro` and `/kiro` simply never fires. There is also no registration hook for the OAuth provider-auth registries, so a plugin cannot supply `oauth_device_code`; [upstream feature request #111258](https://github.com/NousResearch/hermes-agent/issues/111258) proposes the seam, and #113463 asks for the `/usage` hook.
 
-They share one credential store and one provider; the split exists only because a model-provider plugin is deliberately not loaded by Hermes' command-plugin manager.
+Until one of those lands, the provider closes the gap from inside its own import (`provider/__init__.py`, `_register_commands`): it constructs a `PluginContext`, registers the CLI and slash commands, and — because `hermes_cli/auth.py` builds its provider registry eagerly at import, *before* plugins load — the registration happens when `providers/` discovery imports the plugin, which is early enough for both the CLI and the gateway.
 
-The components are deliberately **not usable independently**. The command component returns an install instruction until `kiro-provider` exists; the provider returns the reciprocal instruction until `kiro` exists. The one-line installer installs, validates, then enables the command component only after both are present.
+That construction touches internal API (`PluginContext`, `PluginManifest`). If a Hermes refactor breaks it:
 
-### Why login needs its own plugin today
+- registration failure never takes the provider down — it is wrapped, prints one stderr line, and the provider itself still works;
+- everything remains runnable standalone via `python ~/.hermes/plugins/kiro-provider/commands.py {login|status|usage|logout}`, which imports no `hermes_cli` code at all (enforced by a test).
 
-The model-provider package is loaded for provider discovery, but Hermes does not run its command-registration hook and does not expose a plugin authentication callback for device authorization. The standalone package supplies that missing command surface while the provider continues to own the credentials and HTTPS client. [Upstream feature request #111258](https://github.com/NousResearch/hermes-agent/issues/111258) proposes a native provider-auth hook so a future version can remove this companion plugin.
+Earlier versions of this project shipped a second `kind: standalone` companion plugin for commands. That is no longer needed.
 
 ## Install
 
@@ -42,7 +42,7 @@ The model-provider package is loaded for provider discovery, but Hermes does not
 curl -fsSL https://raw.githubusercontent.com/anpicasso/hermes-plugin-kiro/main/install.sh | bash
 ```
 
-The installer installs or updates both plugin directories and enables the command plugin **for one Hermes profile**. It uses the active profile (`hermes profile use <name>`); if `HERMES_HOME` is set, that explicit profile home wins. It **does not restart anything**.
+The installer installs the plugin **for one Hermes profile**. It uses the active profile (`hermes profile use <name>`); if `HERMES_HOME` is set, that explicit profile home wins. It **does not restart anything**.
 
 ### Profiles
 
@@ -86,12 +86,16 @@ hermes kiro logout
 ## Manual install
 
 ```bash
-hermes plugins install anpicasso/hermes-plugin-kiro/commands --no-enable
-hermes plugins install anpicasso/hermes-plugin-kiro/provider --no-enable
-hermes plugins enable kiro
+hermes plugins install anpicasso/hermes-plugin-kiro/provider --ref "$REF"
 ```
 
-Installing either subdirectory directly is safe, but it remains unusable until its companion is installed. Hermes currently has no third-party post-install hook, so only the one-line installer can automatically enable `kiro` after confirming both components.
+Or plain `hermes plugins install anpicasso/hermes-plugin-kiro/provider` and nothing else — one plugin, no enable step needed for a `model-provider`.
+
+If `hermes kiro` will not register (a Hermes refactor changed internal plugin API), run the commands standalone:
+
+```bash
+python ~/.hermes/plugins/kiro-provider/commands.py {login|status|usage|logout}
+```
 
 `logout` removes only this plugin's local credentials. It does not invent a remote revoke endpoint.
 

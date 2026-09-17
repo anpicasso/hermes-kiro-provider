@@ -76,25 +76,35 @@ def test_empty_success_stream_is_an_error(monkeypatch):
         list(instance.chat.completions.create(model="claude-sonnet-4.5", messages=[{"role": "user", "content": "hi"}], stream=True))
 
 
-def test_provider_client_explains_when_login_companion_is_missing():
-    instance = client.KiroClient(companion_error="Install the Kiro login-command companion.")
-    with pytest.raises(KiroAuthError, match="login-command companion"):
-        instance.chat.completions.create(model="claude-sonnet-4.5", messages=[{"role": "user", "content": "hi"}])
+def test_provider_client_still_constructs_after_companion_cleanup():
+    """companion_error plumbing is gone; the client must construct and raise through normal paths."""
+    instance = client.KiroClient()
+    assert instance.api_key and instance.base_url
 
 
-def test_each_component_explains_its_missing_companion(monkeypatch, tmp_path):
-    import commands
+def test_new_model_catalog_fetches_and_falls_back_when_empty(monkeypatch, tmp_path):
+    """The provider must serve models even when its command registration could not happen."""
     import provider
 
-    monkeypatch.setattr(commands, "_provider_dir", lambda: tmp_path / "kiro-provider")
-    assert "provider companion" in commands.handle_kiro_slash("status")
+    assert provider.profile.fallback_models  # non-empty fallback tuple exists
+    monkeypatch.setattr(client, "list_model_ids", lambda: [])
+    assert provider.profile.fetch_models() == list(provider.profile.fallback_models)
 
-    monkeypatch.setattr(provider, "_commands_companion_error", lambda: "Install the Kiro login-command companion.")
-    with pytest.raises(KiroAuthError, match="login-command companion"):
-        provider.profile.fetch_models()
-    instance = provider.profile.create_client()
-    with pytest.raises(KiroAuthError, match="login-command companion"):
-        instance.chat.completions.create(model="claude-sonnet-4.5", messages=[{"role": "user", "content": "hi"}])
+
+def test_commands_run_standalone_without_hermes_cli(monkeypatch, tmp_path):
+    """commands.py stays plugin-API-free: it is the fallback when command registration breaks."""
+    source = Path(__file__).parents[1] / "provider" / "commands.py"
+    assert "hermes_cli" not in source.read_text()
+
+    import runpy
+    saved_argv = sys.argv[:]
+    try:
+        sys.argv = ["commands.py", "--help"]  # exercises argparse wiring; --help exits cleanly
+        with pytest.raises(SystemExit) as exit_info:  # argparse exits 0 on --help
+            runpy.run_path(str(source), run_name="__main__")
+        assert exit_info.value.code == 0
+    finally:
+        sys.argv = saved_argv
 
 
 def test_event_decoder_handles_a_frame_split_mid_prelude(monkeypatch):

@@ -17,29 +17,10 @@ from client import KiroClient, list_model_ids  # noqa: E402
 _FALLBACK_MODELS = ("claude-sonnet-4.5", "claude-haiku-4.5", "gpt-5.6-terra")
 _CATALOG_MODELS = _FALLBACK_MODELS
 _CATALOG_AT = 0.0
-_INSTALL_COMMANDS = "hermes plugins install anpicasso/hermes-plugin-kiro/commands --no-enable"
-
-
-def _commands_companion_error() -> str | None:
-    """Return an actionable error until the required login command surface exists."""
-    try:
-        from hermes_constants import get_hermes_home
-        directory = get_hermes_home() / "plugins" / "kiro"
-    except Exception:
-        directory = _HERE.parents[1] / "commands"
-    if (directory / "plugin.yaml").is_file():
-        return None
-    return (
-        "Kiro provider requires its login-command companion. Install it before using provider kiro:\n"
-        f"  {_INSTALL_COMMANDS}\n"
-        "  hermes plugins enable kiro"
-    )
 
 
 def _catalog_models() -> tuple:
     global _CATALOG_MODELS, _CATALOG_AT
-    if _commands_companion_error():
-        return ()
     if time.monotonic() - _CATALOG_AT >= 300:
         try:
             models = tuple(list_model_ids())
@@ -61,12 +42,9 @@ class KiroProfile(ProviderProfile):
         _CATALOG_MODELS = tuple(value or _FALLBACK_MODELS)
 
     def create_client(self, **kwargs):
-        return KiroClient(companion_error=_commands_companion_error(), **kwargs)
+        return KiroClient(**kwargs)
 
     def fetch_models(self, **kwargs):
-        if error := _commands_companion_error():
-            from credentials import KiroAuthError
-            raise KiroAuthError(error)
         return list_model_ids() or list(self.fallback_models)
 
 
@@ -88,7 +66,41 @@ profile = KiroProfile(
 register_provider(profile)
 
 
+def _register_commands() -> str | None:
+    """Register `hermes kiro` and `/kiro` from this model-provider plugin.
+
+    Hermes routes ``kind: model-provider`` manifests to providers/ discovery and never calls
+    ``register(ctx)`` with a live context (#111258), so the only way to own our own commands is to
+    build the PluginContext ourselves. That is internal API: on any signature change we degrade to
+    the standalone entrypoint instead of taking the provider down with us.
+    """
+    try:
+        from hermes_cli.plugins import PluginContext, get_plugin_manager
+        from hermes_cli.plugins_manifest import PluginManifest
+        import commands as _commands
+
+        ctx = PluginContext(
+            PluginManifest(name="kiro", version="0.1.7", kind="model-provider", source="user"),
+            get_plugin_manager())
+        ctx.register_cli_command(
+            name="kiro", help="Kiro login, usage and status", setup_fn=_commands.setup_parser,
+            handler_fn=_commands.handle,
+            description="Kiro IAM Identity Center device-code login.")
+        ctx.register_command(
+            name="kiro", handler=_commands.handle_slash, description="Kiro status and usage",
+            args_hint="status|usage", argument_mode="text")
+        return None
+    except Exception as exc:
+        return f"{type(exc).__name__}: {exc}"
+
+
+_COMMAND_REGISTRATION_ERROR = _register_commands()
+if _COMMAND_REGISTRATION_ERROR:
+    print(f"kiro: `hermes kiro` and `/kiro` could not register ({_COMMAND_REGISTRATION_ERROR}).\n"
+          f"Log in with:\n  python {_HERE / 'commands.py'} login", file=sys.stderr)
+
+
 def register(ctx) -> None:
-    # ponytail: model-provider discovery performs the real registration above;
-    # this makes the generic plugin doctor load the same manifest successfully.
+    # ponytail: providers/ discovery already registered the profile and the commands above;
+    # this only lets the generic plugin doctor load the same manifest successfully.
     return None
