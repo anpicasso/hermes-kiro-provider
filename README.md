@@ -50,13 +50,12 @@ Plugins live under each profile's `$HERMES_HOME/plugins`, so install them once i
 
 ```bash
 # Install and log in for the active profile.
-hermes profile use kaito
 curl -fsSL https://raw.githubusercontent.com/anpicasso/hermes-kiro-provider/main/install.sh | bash
 hermes kiro login
 
 # Or target any profile explicitly without changing the active profile.
-curl -fsSL https://raw.githubusercontent.com/anpicasso/hermes-kiro-provider/main/install.sh | HERMES_PROFILE=kaito bash
-hermes kiro login --profile kaito
+curl -fsSL https://raw.githubusercontent.com/anpicasso/hermes-kiro-provider/main/install.sh | HERMES_PROFILE=<name> bash
+hermes kiro login --profile <name>
 
 # Target the default profile explicitly, even while another profile is active.
 curl -fsSL https://raw.githubusercontent.com/anpicasso/hermes-kiro-provider/main/install.sh | HERMES_PROFILE=default bash

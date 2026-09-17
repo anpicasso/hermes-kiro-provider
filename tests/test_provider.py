@@ -247,21 +247,21 @@ def test_credentials_and_cache_follow_hermes_profile_context(monkeypatch, tmp_pa
     from hermes_constants import reset_hermes_home_override, set_hermes_home_override
 
     monkeypatch.setattr(credentials, "_CACHED", {})
-    kaito = tmp_path / "profiles" / "kaito"
-    mega = tmp_path / "profiles" / "mega"
-    token_kaito = set_hermes_home_override(kaito)
+    alpha = tmp_path / "profiles" / "alpha"
+    beta = tmp_path / "profiles" / "beta"
+    token_alpha = set_hermes_home_override(alpha)
     try:
-        credentials.save_credentials(credentials.Credentials("kaito-token", "r", "id", "secret", "us-east-1", BUILDER_ID_START_URL, time.time() + 3600))
-        assert credentials.credential_path() == kaito / "kiro" / "credentials.json"
-        token_mega = set_hermes_home_override(mega)
+        credentials.save_credentials(credentials.Credentials("alpha-token", "r", "id", "secret", "us-east-1", BUILDER_ID_START_URL, time.time() + 3600))
+        assert credentials.credential_path() == alpha / "kiro" / "credentials.json"
+        token_beta = set_hermes_home_override(beta)
         try:
-            credentials.save_credentials(credentials.Credentials("mega-token", "r", "id", "secret", "us-east-1", BUILDER_ID_START_URL, time.time() + 3600))
-            assert credentials.get_credentials().access_token == "mega-token"
+            credentials.save_credentials(credentials.Credentials("beta-token", "r", "id", "secret", "us-east-1", BUILDER_ID_START_URL, time.time() + 3600))
+            assert credentials.get_credentials().access_token == "beta-token"
         finally:
-            reset_hermes_home_override(token_mega)
-        assert credentials.get_credentials().access_token == "kaito-token"
+            reset_hermes_home_override(token_beta)
+        assert credentials.get_credentials().access_token == "alpha-token"
     finally:
-        reset_hermes_home_override(token_kaito)
+        reset_hermes_home_override(token_alpha)
 
 def test_logout_removes_only_hermes_kiro_state(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
