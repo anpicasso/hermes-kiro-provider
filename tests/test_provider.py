@@ -107,6 +107,20 @@ def test_commands_run_standalone_without_hermes_cli(monkeypatch, tmp_path):
         sys.argv = saved_argv
 
 
+def test_core_model_catalog_is_seeded_for_the_arrow_key_picker():
+    """Without this seed `hermes model` falls through to a free-text "Model name:" prompt.
+
+    The core's _api_key_provider_model_list never reads a plugin's fetch_models()/fallback_models,
+    and Kiro has no /v1/models endpoint, so the curated dict is the only list it will find.
+    """
+    import provider  # noqa: F401  (import seeds the catalog)
+    from hermes_cli.models import _PROVIDER_MODELS
+
+    seeded = _PROVIDER_MODELS.get("kiro") or []
+    assert len(seeded) >= 5, "an empty/short list sends the core back to raw text input"
+    assert "claude-sonnet-4.5" in seeded
+
+
 def test_event_decoder_handles_a_frame_split_mid_prelude(monkeypatch):
     class Response:
         def __init__(self):

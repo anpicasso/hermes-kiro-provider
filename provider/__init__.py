@@ -66,6 +66,28 @@ profile = KiroProfile(
 register_provider(profile)
 
 
+def _seed_core_model_catalog() -> None:
+    """Make `hermes model` show an arrow-key picker instead of a raw "Model name:" prompt.
+
+    ``_api_key_provider_model_list`` (hermes_cli/model_setup_flows.py) resolves an api_key
+    provider's list from the core's ``_PROVIDER_MODELS`` curated dict, then models.dev, then a
+    ``GET {base_url}/v1/models`` probe. It never consults the plugin's own ``fetch_models()`` or
+    ``fallback_models``, and Kiro serves no OpenAI-style /models endpoint — so all three miss and
+    the flow falls through to free-text input. Seeding the dict the core does read gives the
+    picker its list. Best-effort: a rename upstream just restores the text prompt.
+    """
+    try:
+        from hermes_cli.models import _PROVIDER_MODELS
+        models = list(_catalog_models() or _FALLBACK_MODELS)
+        if models:
+            _PROVIDER_MODELS.setdefault("kiro", models)
+    except Exception:
+        pass  # ponytail: picker is a nicety; login and inference do not depend on it
+
+
+_seed_core_model_catalog()
+
+
 def _register_commands() -> str | None:
     """Register `hermes kiro` and `/kiro` from this model-provider plugin.
 
