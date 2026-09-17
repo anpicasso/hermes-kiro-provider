@@ -2,7 +2,7 @@
 # Install the Hermes Kiro plugin (provider + its built-in commands). No gateway restart is performed.
 set -euo pipefail
 
-SOURCE="anpicasso/hermes-plugin-kiro"
+SOURCE="anpicasso/hermes-kiro-provider"
 HERMES_ROOT="${HERMES_HOME:-$HOME/.hermes}"
 HERMES_HOME_DIR="$HERMES_ROOT"
 HERMES_ARGS=()

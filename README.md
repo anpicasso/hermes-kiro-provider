@@ -1,4 +1,4 @@
-# hermes-plugin-kiro
+# hermes-kiro-provider
 
 Native Kiro model-provider plugin for Hermes. It connects Hermes directly to Kiro over HTTPS: no local HTTP listener, proxy, daemon, or `kiro-cli` is required.
 
@@ -39,7 +39,7 @@ Earlier versions of this project shipped a second `kind: standalone` companion p
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/anpicasso/hermes-plugin-kiro/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/anpicasso/hermes-kiro-provider/main/install.sh | bash
 ```
 
 The installer installs the plugin **for one Hermes profile**. It uses the active profile (`hermes profile use <name>`); if `HERMES_HOME` is set, that explicit profile home wins. It **does not restart anything**.
@@ -51,15 +51,15 @@ Plugins live under each profile's `$HERMES_HOME/plugins`, so install them once i
 ```bash
 # Install and log in for the active profile.
 hermes profile use kaito
-curl -fsSL https://raw.githubusercontent.com/anpicasso/hermes-plugin-kiro/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/anpicasso/hermes-kiro-provider/main/install.sh | bash
 hermes kiro login
 
 # Or target any profile explicitly without changing the active profile.
-curl -fsSL https://raw.githubusercontent.com/anpicasso/hermes-plugin-kiro/main/install.sh | HERMES_PROFILE=kaito bash
+curl -fsSL https://raw.githubusercontent.com/anpicasso/hermes-kiro-provider/main/install.sh | HERMES_PROFILE=kaito bash
 hermes kiro login --profile kaito
 
 # Target the default profile explicitly, even while another profile is active.
-curl -fsSL https://raw.githubusercontent.com/anpicasso/hermes-plugin-kiro/main/install.sh | HERMES_PROFILE=default bash
+curl -fsSL https://raw.githubusercontent.com/anpicasso/hermes-kiro-provider/main/install.sh | HERMES_PROFILE=default bash
 ```
 
 - A new terminal can immediately run `hermes kiro login`.
@@ -86,10 +86,10 @@ hermes kiro logout
 ## Manual install
 
 ```bash
-hermes plugins install anpicasso/hermes-plugin-kiro/provider --ref "$REF"
+hermes plugins install anpicasso/hermes-kiro-provider/provider --ref "$REF"
 ```
 
-Or plain `hermes plugins install anpicasso/hermes-plugin-kiro/provider` and nothing else — one plugin, no enable step needed for a `model-provider`.
+Or plain `hermes plugins install anpicasso/hermes-kiro-provider/provider` and nothing else — one plugin, no enable step needed for a `model-provider`.
 
 If `hermes kiro` will not register (a Hermes refactor changed internal plugin API), run the commands standalone:
 
