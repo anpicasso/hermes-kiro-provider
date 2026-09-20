@@ -8,8 +8,14 @@ hermes auth add kiro
 
 Then use `hermes auth status|list|refresh|logout kiro`. Select Kiro in the normal main or auxiliary model picker; `/usage` shows Kiro allowances when it is active.
 
-Restart an already-running gateway once so it imports the new provider code:
+Restart an already-running gateway once so it imports the new provider code. Use the multiplexed gateway command:
 
 ```bash
-systemctl --user restart hermes-gateway
+hermes gateway restart
+```
+
+For a non-multiplexed gateway serving one named profile:
+
+```bash
+hermes --profile work gateway restart
 ```

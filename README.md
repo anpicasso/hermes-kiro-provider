@@ -37,10 +37,16 @@ Plugins are profile-scoped. Install once per profile that should use Kiro:
 hermes --profile work plugins install anpicasso/hermes-kiro-provider/provider
 ```
 
-Restart an already-running gateway once after installation so it imports the provider:
+Restart an already-running multiplexed gateway once after installation so it imports the provider:
 
 ```bash
-systemctl --user restart hermes-gateway
+hermes gateway restart
+```
+
+For a non-multiplexed gateway serving one named profile:
+
+```bash
+hermes --profile work gateway restart
 ```
 
 ## Authenticate
