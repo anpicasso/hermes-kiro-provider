@@ -20,6 +20,16 @@ from credentials import BUILDER_ID_START_URL, KiroAuthError, _next_login_choice,
 from translate import build_request
 
 
+def _register_local_profile():
+    """Finish core discovery, then exercise this checkout instead of an installed copy."""
+    import provider
+    import providers
+
+    providers.get_provider_profile("kiro")
+    providers.register_provider(provider.profile)
+    return provider
+
+
 def test_start_url_is_strict_and_region_maps():
     assert validate_start_url(BUILDER_ID_START_URL) == BUILDER_ID_START_URL
     assert validate_start_url("https://d-abc.awsapps.com/start/") == "https://d-abc.awsapps.com/start"
@@ -107,18 +117,24 @@ def test_commands_run_standalone_without_hermes_cli(monkeypatch, tmp_path):
         sys.argv = saved_argv
 
 
-def test_core_model_catalog_is_seeded_for_the_arrow_key_picker():
-    """Without this seed `hermes model` falls through to a free-text "Model name:" prompt.
+def test_native_profile_declares_auth_catalog_and_capabilities(monkeypatch):
+    import provider
+    from hermes_cli.models import provider_model_ids
 
-    The core's _api_key_provider_model_list never reads a plugin's fetch_models()/fallback_models,
-    and Kiro has no /v1/models endpoint, so the curated dict is the only list it will find.
-    """
-    import provider  # noqa: F401  (import seeds the catalog)
-    from hermes_cli.models import _PROVIDER_MODELS
-
-    seeded = _PROVIDER_MODELS.get("kiro") or []
-    assert len(seeded) >= 5, "an empty/short list sends the core back to raw text input"
-    assert "claude-sonnet-4.5" in seeded
+    _register_local_profile()
+    assert provider.profile.auth_type == "oauth_device_code"
+    assert provider.profile.env_vars == ()
+    assert provider.profile.auth_handler is credentials.auth_handler
+    assert provider.profile.refresh_credential is credentials.refresh_credential
+    assert provider.profile.model_capabilities["claude-haiku-4.5"] == {
+        "supports_vision": False,
+        "supports_tools": True,
+    }
+    monkeypatch.setattr(provider, "list_model_ids", lambda: ["live-model"])
+    monkeypatch.setattr(provider, "_CATALOG_AT", 0.0)
+    monkeypatch.setattr(provider, "_CATALOG_MODELS", provider._FALLBACK_MODELS)
+    assert provider.profile.fetch_models() == ["live-model"]
+    assert provider_model_ids("kiro") == ["live-model"]
 
 
 def test_event_decoder_handles_a_frame_split_mid_prelude(monkeypatch):
@@ -163,7 +179,7 @@ def test_idc_discovers_profile_arn_without_prompting(monkeypatch):
     calls = []
     creds = SimpleNamespace(api_region="us-east-1", access_token="token", profile_arn="", is_builder_id=False)
     monkeypatch.setattr(client, "get_credentials", lambda **_: creds)
-    monkeypatch.setattr(client, "save_credentials", lambda _: None)
+    monkeypatch.setattr(client, "remember_profile_arn", lambda _: None)
     monkeypatch.setattr(client, "_management", lambda *_: calls.append(True) or {"profiles": [{"arn": "arn:aws:codewhisperer:us-east-1:1:profile/team"}]})
     monkeypatch.setattr(client, "request", lambda method, url, **kwargs: captured.update(method=method, url=url, **kwargs) or SimpleNamespace())
     instance._open({"conversationState": {}})
@@ -196,26 +212,98 @@ def test_usage_splits_included_credit_from_overage():
     assert "- Credit: 1,000/1,000 (100%); resets 2026-10-01 00:00 UTC" in usage
     assert "  Extra usage: 860.55/10,000 credits (9% of cap); $34.42 USD at $0.04/credit" in usage
 
-
-def test_refresh_is_single_flight_for_concurrent_expired_requests(monkeypatch):
-    creds = credentials.Credentials("old", "refresh", "id", "secret", "us-east-1", BUILDER_ID_START_URL, 0)
-    calls = []
-    monkeypatch.setattr(credentials, "_CACHED", {})
-    monkeypatch.setattr(credentials, "_read", lambda: creds)
-    monkeypatch.setattr(credentials, "save_credentials", lambda value: None)
-    monkeypatch.setattr(credentials, "_post", lambda *_: calls.append(True) or {"accessToken": "new", "expiresIn": 3600})
-    results = []
-    threads = [threading.Thread(target=lambda: results.append(credentials.get_credentials().access_token)) for _ in range(8)]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
-    assert calls == [True]
-    assert results == ["new"] * 8
+    snapshot = client.build_usage_snapshot({"usageBreakdownList": [{
+        "displayName": "Credit", "currentUsage": 1860, "usageLimit": 1000,
+        "currentOveragesWithPrecision": 860.55, "overageCapWithPrecision": 10000,
+        "overageCharges": 34.4222627, "currency": "USD", "nextDateReset": 1790812800.0,
+    }]})
+    assert snapshot.provider == "kiro" and snapshot.source == "kiro_usage_api"
+    assert snapshot.windows[0].used_percent == 100
+    assert snapshot.windows[0].detail == "1000/1000"
+    assert snapshot.raw["usageBreakdownList"][0]["currentUsage"] == 1860
+    assert snapshot.details == ("Credit extra usage: 860.55/10000; 34.4222627 USD",)
 
 
-def test_concurrent_401_refreshes_once(monkeypatch):
+def test_native_auth_add_persists_opaque_pool_metadata(monkeypatch, tmp_path):
+    from agent.credential_pool import load_pool
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "profile"))
+    token = set_hermes_home_override(tmp_path / "profile")
+    try:
+        creds = credentials.Credentials(
+            "access", "refresh", "client", "secret", "us-east-1",
+            BUILDER_ID_START_URL, time.time() + 3600, 4_102_444_800,
+        )
+        monkeypatch.setattr(credentials, "prompt_login_inputs", lambda *_: (BUILDER_ID_START_URL, "us-east-1"))
+        monkeypatch.setattr(credentials, "_device_login", lambda *_: (creds, "https://verify", "CODE"))
+        assert credentials.auth_handler("add", SimpleNamespace(label="work", priority=0)) is True
+        assert credentials.auth_handler("status", SimpleNamespace()) is False
+        row = load_pool("kiro").entries()[0]
+        assert (row.auth_type, row.label, row.access_token, row.refresh_token) == (
+            "oauth", "work", "access", "refresh",
+        )
+        assert row.extra == {
+            "client_id": "client",
+            "client_secret": "secret",
+            "region": "us-east-1",
+            "start_url": BUILDER_ID_START_URL,
+            "client_secret_expires_at": 4_102_444_800,
+        }
+        assert row.base_url is None
+    finally:
+        reset_hermes_home_override(token)
+
+
+def test_plugin_refresh_rotates_pool_row_and_preserves_metadata(monkeypatch, tmp_path):
+    from agent.credential_pool import load_pool
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    _register_local_profile()
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "profile"))
+    token = set_hermes_home_override(tmp_path / "profile")
+    try:
+        entry = credentials.persist_credentials(credentials.Credentials(
+            "old", "refresh", "client", "secret", "us-east-1",
+            BUILDER_ID_START_URL, time.time() + 3600,
+        ))
+        calls = []
+        monkeypatch.setattr(credentials, "_post", lambda *_: calls.append(True) or {
+            "accessToken": "new", "refreshToken": "new-refresh", "expiresIn": 3600,
+        })
+        refreshed = load_pool("kiro").try_refresh_matching(credential_id=entry.id)
+        assert calls == [True]
+        assert (refreshed.access_token, refreshed.refresh_token) == ("new", "new-refresh")
+        assert refreshed.extra["client_secret"] == "secret"
+    finally:
+        reset_hermes_home_override(token)
+
+
+def test_mixed_region_rows_remain_eligible_for_failover(monkeypatch, tmp_path):
+    from agent.credential_pool import credential_pool_entry_serves_endpoint
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    token = set_hermes_home_override(tmp_path)
+    try:
+        eu = credentials.persist_credentials(credentials.Credentials(
+            "eu", "refresh", "client", "secret", "eu-central-1",
+            "https://example.awsapps.com/start", time.time() + 3600,
+        ))
+        assert eu.base_url is None
+        assert credential_pool_entry_serves_endpoint(eu, "https://runtime.us-east-1.kiro.dev")
+    finally:
+        reset_hermes_home_override(token)
+
+
+def test_concurrent_401_refreshes_once(monkeypatch, tmp_path):
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    _register_local_profile()
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "profile"))
+    token = set_hermes_home_override(tmp_path / "profile")
     creds = credentials.Credentials("old", "refresh", "id", "secret", "us-east-1", BUILDER_ID_START_URL, time.time() + 3600)
+    credentials.persist_credentials(creds)
     barrier = threading.Barrier(2)
     refreshes, retried, errors = [], [], []
 
@@ -233,9 +321,6 @@ def test_concurrent_401_refreshes_once(monkeypatch):
         retried.append(token)
         return Response()
 
-    monkeypatch.setattr(credentials, "_CACHED", {})
-    monkeypatch.setattr(credentials, "_read", lambda: creds)
-    monkeypatch.setattr(credentials, "save_credentials", lambda value: None)
     monkeypatch.setattr(credentials, "_post", lambda *_: refreshes.append(True) or {"accessToken": "new", "expiresIn": 3600})
     monkeypatch.setattr(client, "get_credentials", credentials.get_credentials)
     monkeypatch.setattr(client, "request", fake_request)
@@ -246,45 +331,104 @@ def test_concurrent_401_refreshes_once(monkeypatch):
         except Exception as exc:
             errors.append(exc)
 
-    threads = [threading.Thread(target=run) for _ in range(2)]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
-    assert not errors
-    assert refreshes == [True]
-    assert retried == ["Bearer new", "Bearer new"]
+    try:
+        threads = [threading.Thread(target=run) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert not errors
+        assert refreshes == [True]
+        assert retried == ["Bearer new", "Bearer new"]
+    finally:
+        reset_hermes_home_override(token)
 
 
 
 def test_credentials_and_cache_follow_hermes_profile_context(monkeypatch, tmp_path):
     from hermes_constants import reset_hermes_home_override, set_hermes_home_override
 
-    monkeypatch.setattr(credentials, "_CACHED", {})
     alpha = tmp_path / "profiles" / "alpha"
     beta = tmp_path / "profiles" / "beta"
+    monkeypatch.setenv("HERMES_HOME", str(alpha))
     token_alpha = set_hermes_home_override(alpha)
     try:
-        credentials.save_credentials(credentials.Credentials("alpha-token", "r", "id", "secret", "us-east-1", BUILDER_ID_START_URL, time.time() + 3600))
+        credentials.persist_credentials(credentials.Credentials("alpha-token", "r", "id", "secret", "us-east-1", BUILDER_ID_START_URL, time.time() + 3600))
         assert credentials.credential_path() == alpha / "kiro" / "credentials.json"
         token_beta = set_hermes_home_override(beta)
         try:
-            credentials.save_credentials(credentials.Credentials("beta-token", "r", "id", "secret", "us-east-1", BUILDER_ID_START_URL, time.time() + 3600))
+            monkeypatch.setenv("HERMES_HOME", str(beta))
+            credentials.persist_credentials(credentials.Credentials("beta-token", "r", "id", "secret", "us-east-1", BUILDER_ID_START_URL, time.time() + 3600))
             assert credentials.get_credentials().access_token == "beta-token"
         finally:
             reset_hermes_home_override(token_beta)
+            monkeypatch.setenv("HERMES_HOME", str(alpha))
         assert credentials.get_credentials().access_token == "alpha-token"
     finally:
         reset_hermes_home_override(token_alpha)
 
 def test_logout_removes_only_hermes_kiro_state(monkeypatch, tmp_path):
+    from agent.credential_pool import load_pool
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    monkeypatch.setattr(credentials, "_CACHED", {})
-    (tmp_path / ".env").write_text("OTHER=value\nKIRO_AUTH=kiro-oauth-local\n")
-    credentials._write(credentials.Credentials("a", "r", "id", "secret", "us-east-1", BUILDER_ID_START_URL, time.time() + 60))
-    assert credentials.logout() is True
-    assert not credentials.credential_path().exists()
-    assert (tmp_path / ".env").read_text() == "OTHER=value\n"
+    token = set_hermes_home_override(tmp_path)
+    try:
+        (tmp_path / ".env").write_text("OTHER=value\nKIRO_AUTH=kiro-oauth-local\n")
+        credentials.persist_credentials(credentials.Credentials(
+            "a", "r", "id", "secret", "us-east-1", BUILDER_ID_START_URL, time.time() + 60,
+        ))
+        assert credentials.logout() is True
+        assert not load_pool("kiro").entries()
+        assert (tmp_path / ".env").read_text() == "OTHER=value\n"
+    finally:
+        reset_hermes_home_override(token)
+
+
+def test_legacy_credentials_migrate_once(monkeypatch, tmp_path):
+    from agent.credential_pool import load_pool
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    token = set_hermes_home_override(tmp_path)
+    try:
+        target = credentials.credential_path()
+        target.parent.mkdir(parents=True)
+        target.write_text(json.dumps({
+            "access_token": "legacy", "refresh_token": "refresh", "client_id": "id",
+            "client_secret": "secret", "region": "us-east-1", "start_url": BUILDER_ID_START_URL,
+            "expires_at": time.time() + 3600, "client_secret_expires_at": 0, "profile_arn": "",
+        }))
+        (tmp_path / ".env").write_text("KIRO_AUTH=kiro-oauth-local\nOTHER=value\n")
+        assert credentials.migrate_legacy_credentials() is True
+        assert credentials.migrate_legacy_credentials() is False
+        row = load_pool("kiro").entries()[0]
+        assert row.access_token == "legacy" and row.extra["client_secret"] == "secret"
+        assert not target.exists()
+        assert (tmp_path / ".env").read_text() == "OTHER=value\n"
+    finally:
+        reset_hermes_home_override(token)
+
+
+def test_corrupt_legacy_state_does_not_break_native_status(monkeypatch, tmp_path):
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    token = set_hermes_home_override(tmp_path)
+    try:
+        target = credentials.credential_path()
+        target.parent.mkdir(parents=True)
+        target.write_text("not-json")
+        assert credentials.auth_handler("status", SimpleNamespace()) is False
+        with pytest.raises(KiroAuthError, match="Legacy Kiro credentials are unreadable"):
+            credentials.get_credentials()
+    finally:
+        reset_hermes_home_override(token)
+
+
+def test_native_auth_rejects_wrong_explicit_type():
+    with pytest.raises(KiroAuthError, match="device-code OAuth"):
+        credentials.auth_handler("add", SimpleNamespace(auth_type="api-key"))
 
 
 def test_tool_calls_round_trip_and_nonstream_is_awaitable(monkeypatch):

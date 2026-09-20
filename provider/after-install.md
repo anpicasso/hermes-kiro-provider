@@ -1,15 +1,15 @@
 # Kiro provider installed
 
-Sign in before selecting the provider:
+Authenticate through Hermes' native provider-auth surface:
 
 ```bash
-hermes kiro login
+hermes auth add kiro
 ```
 
-Then `hermes kiro status`, `hermes kiro usage`, and `/kiro status` / `/kiro usage` in a session.
+Then use `hermes auth status|list|refresh|logout kiro`. Select Kiro in the normal main or auxiliary model picker; `/usage` shows Kiro allowances when it is active.
 
-If `hermes kiro` is unavailable after a Hermes upgrade, the same commands run standalone:
+Restart an already-running gateway once so it imports the new provider code:
 
 ```bash
-python ~/.hermes/plugins/kiro-provider/commands.py {login|status|usage|logout}
+systemctl --user restart hermes-gateway
 ```
