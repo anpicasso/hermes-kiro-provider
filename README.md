@@ -44,13 +44,13 @@ The plugin no longer reads the old `$HERMES_HOME/kiro/credentials.json` file, th
 Use Hermes' built-in plugin installer (Hermes Agent 0.21.3 or newer):
 
 ```bash
-hermes plugins install anpicasso/hermes-kiro-provider/provider
+hermes plugins install kiro-provider
 ```
 
 Plugins are profile-scoped. Install once per profile that should use Kiro:
 
 ```bash
-hermes --profile work plugins install anpicasso/hermes-kiro-provider/provider
+hermes --profile work plugins install kiro-provider
 ```
 
 Restart an already-running multiplexed gateway once after installation so it imports the provider:
