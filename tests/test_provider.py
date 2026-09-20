@@ -226,8 +226,10 @@ def test_usage_splits_included_credit_from_overage():
 
 def test_native_auth_add_persists_opaque_pool_metadata(monkeypatch, tmp_path):
     from agent.credential_pool import load_pool
+    from hermes_cli.runtime_provider import resolve_runtime_provider
     from hermes_constants import reset_hermes_home_override, set_hermes_home_override
 
+    _register_local_profile()
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "profile"))
     token = set_hermes_home_override(tmp_path / "profile")
     try:
@@ -250,7 +252,35 @@ def test_native_auth_add_persists_opaque_pool_metadata(monkeypatch, tmp_path):
             "start_url": BUILDER_ID_START_URL,
             "client_secret_expires_at": 4_102_444_800,
         }
-        assert row.base_url is None
+        assert row.base_url == credentials.RUNTIME_BASE_URL
+        runtime = resolve_runtime_provider(requested="kiro", target_model="claude-haiku-4.5")
+        assert runtime["base_url"] == credentials.RUNTIME_BASE_URL
+        assert runtime["api_key"] == "access"
+    finally:
+        reset_hermes_home_override(token)
+
+
+def test_status_repairs_v020_rows_missing_base_url(monkeypatch, tmp_path):
+    from agent.credential_pool import load_pool
+    from hermes_cli.auth import read_credential_pool, write_credential_pool
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    token = set_hermes_home_override(tmp_path)
+    try:
+        credentials.persist_credentials(credentials.Credentials(
+            "access", "refresh", "client", "secret", "us-east-1",
+            BUILDER_ID_START_URL, time.time() + 3600,
+        ))
+        rows = read_credential_pool("kiro")
+        rows[0].pop("base_url", None)
+        write_credential_pool("kiro", rows)
+
+        assert load_pool("kiro").entries()[0].base_url is None
+        assert credentials.auth_handler("status", SimpleNamespace()) is False
+        repaired = load_pool("kiro").entries()[0]
+        assert repaired.base_url == credentials.RUNTIME_BASE_URL
+        assert repaired.extra["client_secret"] == "secret"
     finally:
         reset_hermes_home_override(token)
 
@@ -290,8 +320,8 @@ def test_mixed_region_rows_remain_eligible_for_failover(monkeypatch, tmp_path):
             "eu", "refresh", "client", "secret", "eu-central-1",
             "https://example.awsapps.com/start", time.time() + 3600,
         ))
-        assert eu.base_url is None
-        assert credential_pool_entry_serves_endpoint(eu, "https://runtime.us-east-1.kiro.dev")
+        assert eu.base_url == credentials.RUNTIME_BASE_URL
+        assert credential_pool_entry_serves_endpoint(eu, credentials.RUNTIME_BASE_URL)
     finally:
         reset_hermes_home_override(token)
 

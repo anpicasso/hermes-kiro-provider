@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 
 PROVIDER = "kiro"
 SOURCE = "manual:kiro_device_code"
+RUNTIME_BASE_URL = "https://runtime.us-east-1.kiro.dev"
 _API_REGIONS = {"us-east-1", "eu-central-1"}
 _REGION_MAP = {
     "us-west-1": "us-east-1", "us-west-2": "us-east-1", "us-east-2": "us-east-1",
@@ -161,6 +162,7 @@ def _pool_entry(creds: Credentials, *, label: str, source: str = SOURCE) -> Pool
         auth_type=AUTH_TYPE_OAUTH,
         priority=0,
         source=source,
+        base_url=RUNTIME_BASE_URL,
         access_token=creds.access_token,
         refresh_token=creds.refresh_token,
         expires_at_ms=int(creds.expires_at * 1000),
@@ -185,6 +187,25 @@ def persist_credentials(
     if priority is not None:
         entry = pool.move_entry(entry.id, int(priority)) or entry
     return entry
+
+
+def repair_pool_base_urls() -> bool:
+    """Upgrade v0.2.0 rows that lacked the logical endpoint required by Hermes."""
+    from hermes_cli.auth import _auth_store_lock, read_credential_pool, write_credential_pool
+
+    with _LOCK:
+        with _auth_store_lock():
+            rows = read_credential_pool(PROVIDER)
+            repaired = [
+                {**row, "base_url": RUNTIME_BASE_URL}
+                if isinstance(row, dict) and not str(row.get("base_url") or "").strip()
+                else row
+                for row in rows
+            ]
+            if repaired == rows:
+                return False
+            write_credential_pool(PROVIDER, repaired)
+            return True
 
 
 def _read_legacy() -> Credentials:
@@ -444,6 +465,7 @@ def auth_handler(action: str, args: Any) -> bool:
             migrate_legacy_credentials()
         except KiroAuthError:
             pass
+        repair_pool_base_urls()
         return False
     if action != "add":
         return False
