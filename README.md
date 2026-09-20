@@ -21,7 +21,23 @@ flowchart LR
     T --> K[Kiro APIs\nstream · models · usage]
 ```
 
-Older releases stored credentials in `$HERMES_HOME/kiro/credentials.json` and used a `KIRO_AUTH` sentinel. The first native auth/runtime operation migrates that state into `auth.json` and removes the obsolete files.
+## ⚠️ v1.0.0 requires signing in again
+
+v1.0.0 removes compatibility with credentials created by earlier releases. After upgrading, replace each profile's existing Kiro login:
+
+```bash
+hermes auth logout kiro
+hermes auth add kiro
+```
+
+For a named profile:
+
+```bash
+hermes --profile work auth logout kiro
+hermes --profile work auth add kiro
+```
+
+The plugin no longer reads the old `$HERMES_HOME/kiro/credentials.json` file, the `KIRO_AUTH` sentinel, or repairs pre-v1.0 credential-pool rows.
 
 ## Install
 

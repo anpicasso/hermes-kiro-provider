@@ -260,31 +260,6 @@ def test_native_auth_add_persists_opaque_pool_metadata(monkeypatch, tmp_path):
         reset_hermes_home_override(token)
 
 
-def test_status_repairs_v020_rows_missing_base_url(monkeypatch, tmp_path):
-    from agent.credential_pool import load_pool
-    from hermes_cli.auth import read_credential_pool, write_credential_pool
-    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
-
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    token = set_hermes_home_override(tmp_path)
-    try:
-        credentials.persist_credentials(credentials.Credentials(
-            "access", "refresh", "client", "secret", "us-east-1",
-            BUILDER_ID_START_URL, time.time() + 3600,
-        ))
-        rows = read_credential_pool("kiro")
-        rows[0].pop("base_url", None)
-        write_credential_pool("kiro", rows)
-
-        assert load_pool("kiro").entries()[0].base_url is None
-        assert credentials.auth_handler("status", SimpleNamespace()) is False
-        repaired = load_pool("kiro").entries()[0]
-        assert repaired.base_url == credentials.RUNTIME_BASE_URL
-        assert repaired.extra["client_secret"] == "secret"
-    finally:
-        reset_hermes_home_override(token)
-
-
 def test_plugin_refresh_rotates_pool_row_and_preserves_metadata(monkeypatch, tmp_path):
     from agent.credential_pool import load_pool
     from hermes_constants import reset_hermes_home_override, set_hermes_home_override
@@ -384,7 +359,7 @@ def test_credentials_and_cache_follow_hermes_profile_context(monkeypatch, tmp_pa
     token_alpha = set_hermes_home_override(alpha)
     try:
         credentials.persist_credentials(credentials.Credentials("alpha-token", "r", "id", "secret", "us-east-1", BUILDER_ID_START_URL, time.time() + 3600))
-        assert credentials.credential_path() == alpha / "kiro" / "credentials.json"
+        assert credentials.state_dir() == alpha / "kiro"
         token_beta = set_hermes_home_override(beta)
         try:
             monkeypatch.setenv("HERMES_HOME", str(beta))
@@ -397,61 +372,18 @@ def test_credentials_and_cache_follow_hermes_profile_context(monkeypatch, tmp_pa
     finally:
         reset_hermes_home_override(token_alpha)
 
-def test_logout_removes_only_hermes_kiro_state(monkeypatch, tmp_path):
+def test_logout_removes_only_hermes_pool_state(monkeypatch, tmp_path):
     from agent.credential_pool import load_pool
     from hermes_constants import reset_hermes_home_override, set_hermes_home_override
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     token = set_hermes_home_override(tmp_path)
     try:
-        (tmp_path / ".env").write_text("OTHER=value\nKIRO_AUTH=kiro-oauth-local\n")
         credentials.persist_credentials(credentials.Credentials(
             "a", "r", "id", "secret", "us-east-1", BUILDER_ID_START_URL, time.time() + 60,
         ))
         assert credentials.logout() is True
         assert not load_pool("kiro").entries()
-        assert (tmp_path / ".env").read_text() == "OTHER=value\n"
-    finally:
-        reset_hermes_home_override(token)
-
-
-def test_legacy_credentials_migrate_once(monkeypatch, tmp_path):
-    from agent.credential_pool import load_pool
-    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
-
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    token = set_hermes_home_override(tmp_path)
-    try:
-        target = credentials.credential_path()
-        target.parent.mkdir(parents=True)
-        target.write_text(json.dumps({
-            "access_token": "legacy", "refresh_token": "refresh", "client_id": "id",
-            "client_secret": "secret", "region": "us-east-1", "start_url": BUILDER_ID_START_URL,
-            "expires_at": time.time() + 3600, "client_secret_expires_at": 0, "profile_arn": "",
-        }))
-        (tmp_path / ".env").write_text("KIRO_AUTH=kiro-oauth-local\nOTHER=value\n")
-        assert credentials.migrate_legacy_credentials() is True
-        assert credentials.migrate_legacy_credentials() is False
-        row = load_pool("kiro").entries()[0]
-        assert row.access_token == "legacy" and row.extra["client_secret"] == "secret"
-        assert not target.exists()
-        assert (tmp_path / ".env").read_text() == "OTHER=value\n"
-    finally:
-        reset_hermes_home_override(token)
-
-
-def test_corrupt_legacy_state_does_not_break_native_status(monkeypatch, tmp_path):
-    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
-
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    token = set_hermes_home_override(tmp_path)
-    try:
-        target = credentials.credential_path()
-        target.parent.mkdir(parents=True)
-        target.write_text("not-json")
-        assert credentials.auth_handler("status", SimpleNamespace()) is False
-        with pytest.raises(KiroAuthError, match="Legacy Kiro credentials are unreadable"):
-            credentials.get_credentials()
     finally:
         reset_hermes_home_override(token)
 
@@ -609,7 +541,7 @@ def test_capability_cache_persists_across_module_restart_and_profiles(monkeypatc
     alpha_token = set_hermes_home_override(alpha)
     try:
         capabilities.mark_additional_model_request_fields_unsupported("minimax-m2.5")
-        cache_file = credentials.credential_path().parent / "model-capabilities.json"
+        cache_file = credentials.state_dir() / "model-capabilities.json"
         assert cache_file.exists()
         assert "minimax-m2.5" in cache_file.read_text()
         del sys.modules["capabilities"]
@@ -687,7 +619,7 @@ def test_invalid_capability_cache_schema_is_empty(payload, tmp_path):
 
     token = set_hermes_home_override(tmp_path / "profile")
     try:
-        cache_file = credentials.credential_path().parent / "model-capabilities.json"
+        cache_file = credentials.state_dir() / "model-capabilities.json"
         cache_file.parent.mkdir(parents=True)
         cache_file.write_text(json.dumps(payload))
         assert capabilities.additional_model_request_fields_supported("valid") is True
@@ -702,7 +634,7 @@ def test_capability_cache_hits_memory_and_invalidates_external_changes(monkeypat
 
     token = set_hermes_home_override(tmp_path / "profile")
     try:
-        cache_file = credentials.credential_path().parent / "model-capabilities.json"
+        cache_file = credentials.state_dir() / "model-capabilities.json"
         cache_file.parent.mkdir(parents=True)
         cache_file.write_text(json.dumps({"additionalModelRequestFieldsUnsupportedModels": ["first"]}))
         reads = []

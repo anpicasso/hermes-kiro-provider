@@ -11,7 +11,7 @@ from pathlib import Path
 from threading import RLock
 from typing import Iterator
 
-from credentials import credential_path
+from credentials import state_dir
 
 try:
     import fcntl
@@ -35,7 +35,7 @@ _MEMORY: dict[Path, _CacheEntry] = {}
 
 
 def _cache_path() -> Path:
-    return credential_path().parent / _CACHE_NAME
+    return state_dir() / _CACHE_NAME
 
 
 def _file_signature(path: Path) -> tuple[int, int, int] | None:

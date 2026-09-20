@@ -9,7 +9,6 @@ import urllib.parse
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from threading import Lock
 from typing import TYPE_CHECKING, Any
 
 from hermes_constants import get_hermes_home
@@ -31,7 +30,6 @@ _SCOPES = ["codewhisperer:completions", "codewhisperer:analysis", "codewhisperer
 _GRANTS = ["urn:ietf:params:oauth:grant-type:device_code", "refresh_token"]
 _TERMINAL_REFRESH_CODES = {"invalid_client", "invalid_grant", "invalid_token", "unauthorized_client"}
 BUILDER_ID_START_URL = "https://view.awsapps.com/start"
-_LOCK = Lock()
 _PROFILE_ARNS: dict[str, str] = {}
 
 
@@ -69,9 +67,9 @@ def hermes_home() -> Path:
     return get_hermes_home()
 
 
-def credential_path() -> Path:
-    """Legacy credential path retained only for one-time migration."""
-    return hermes_home() / "kiro" / "credentials.json"
+def state_dir() -> Path:
+    """Return Kiro's profile-scoped non-secret state directory."""
+    return hermes_home() / "kiro"
 
 
 def runtime_region(region: str) -> str:
@@ -189,62 +187,6 @@ def persist_credentials(
     return entry
 
 
-def repair_pool_base_urls() -> bool:
-    """Upgrade v0.2.0 rows that lacked the logical endpoint required by Hermes."""
-    from hermes_cli.auth import _auth_store_lock, read_credential_pool, write_credential_pool
-
-    with _LOCK:
-        with _auth_store_lock():
-            rows = read_credential_pool(PROVIDER)
-            repaired = [
-                {**row, "base_url": RUNTIME_BASE_URL}
-                if isinstance(row, dict) and not str(row.get("base_url") or "").strip()
-                else row
-                for row in rows
-            ]
-            if repaired == rows:
-                return False
-            write_credential_pool(PROVIDER, repaired)
-            return True
-
-
-def _read_legacy() -> Credentials:
-    try:
-        data = json.loads(credential_path().read_text())
-        return Credentials(**data)
-    except (OSError, TypeError, ValueError) as exc:
-        raise KiroAuthError("Legacy Kiro credentials are unreadable; run `hermes auth add kiro` again.") from exc
-
-
-def _remove_legacy_sentinel() -> None:
-    env = hermes_home() / ".env"
-    if not env.exists():
-        return
-    rows = env.read_text().splitlines()
-    kept = [row for row in rows if row != "KIRO_AUTH=kiro-oauth-local"]
-    if kept != rows:
-        env.write_text("\n".join(kept) + ("\n" if kept else ""))
-
-
-def migrate_legacy_credentials() -> bool:
-    """Move the pre-native credentials.json row into auth.json exactly once."""
-    from hermes_cli.auth import _auth_store_lock, read_credential_pool
-
-    target = credential_path()
-    if not target.exists():
-        return False
-    with _LOCK:
-        with _auth_store_lock():
-            if not target.exists() or read_credential_pool(PROVIDER):
-                return False
-            creds = _read_legacy()
-            # Remove the old fake API-key env row before load_pool() can seed it.
-            _remove_legacy_sentinel()
-            persist_credentials(creds, label="kiro-oauth-1", source="manual:kiro_legacy")
-            target.unlink()
-            return True
-
-
 def remember_profile_arn(creds: Credentials) -> None:
     """Cache discovered non-secret profile metadata without racing token rotation on disk."""
     if creds.credential_id and creds.profile_arn:
@@ -308,8 +250,6 @@ def login(
     """Run device authorization and save the resulting grant in Hermes' pool."""
     creds, uri, user_code = _device_login(start_url, region)
     persist_credentials(creds, label=label, priority=priority)
-    credential_path().unlink(missing_ok=True)
-    _remove_legacy_sentinel()
     return uri, user_code
 
 
@@ -350,7 +290,6 @@ def get_credentials(force_refresh: bool = False, stale_access_token: str = "") -
     """Select a pooled credential and let Hermes serialize any needed refresh."""
     from agent.credential_pool import load_pool
 
-    migrate_legacy_credentials()
     pool = load_pool(PROVIDER)
     entries = pool.entries()
     if not entries:
@@ -383,10 +322,8 @@ def logout() -> bool:
     from agent.credential_pool import load_pool
     from hermes_cli.auth import clear_provider_auth
 
-    had_state = bool(load_pool(PROVIDER).entries() or credential_path().exists())
+    had_state = bool(load_pool(PROVIDER).entries())
     clear_provider_auth(PROVIDER)
-    credential_path().unlink(missing_ok=True)
-    _remove_legacy_sentinel()
     return had_state
 
 
@@ -456,17 +393,6 @@ def prompt_login_inputs(start_url: str | None, region: str | None, input_fn=inpu
 
 def auth_handler(action: str, args: Any) -> bool:
     """Own Kiro login; status/logout/refresh intentionally use Hermes' generic pool paths."""
-    if action == "logout":
-        credential_path().unlink(missing_ok=True)
-        _remove_legacy_sentinel()
-        return False
-    if action in {"status", "refresh"}:
-        try:
-            migrate_legacy_credentials()
-        except KiroAuthError:
-            pass
-        repair_pool_base_urls()
-        return False
     if action != "add":
         return False
     requested_type = str(getattr(args, "auth_type", "") or "").strip().lower().replace("-", "_")
