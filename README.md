@@ -25,15 +25,16 @@ Older releases stored credentials in `$HERMES_HOME/kiro/credentials.json` and us
 
 ## Install
 
+Use Hermes' built-in plugin installer (Hermes Agent 0.21.3 or newer):
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/anpicasso/hermes-kiro-provider/main/install.sh | bash
+hermes plugins install anpicasso/hermes-kiro-provider/provider
 ```
 
-The installer targets the active Hermes profile, or the profile selected with `HERMES_PROFILE`. Install once per profile that should use Kiro:
+Plugins are profile-scoped. Install once per profile that should use Kiro:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/anpicasso/hermes-kiro-provider/main/install.sh \
-  | HERMES_PROFILE=work bash
+hermes --profile work plugins install anpicasso/hermes-kiro-provider/provider
 ```
 
 Restart an already-running gateway once after installation so it imports the provider:
@@ -66,12 +67,6 @@ hermes --profile work auth add kiro
 ```
 
 Then select Kiro for the main model or any auxiliary task through the normal Hermes model pickers. When Kiro is active, `/usage` uses the provider's native account-usage hook.
-
-## Manual install
-
-```bash
-hermes plugins install anpicasso/hermes-kiro-provider/provider --ref "$REF"
-```
 
 ## Development
 
