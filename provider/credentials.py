@@ -1,21 +1,25 @@
-"""Hermes-owned IAM Identity Center credentials for Kiro."""
+"""Kiro IAM Identity Center auth backed by Hermes' credential pool."""
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
-import tempfile
 import time
 import urllib.parse
-from dataclasses import asdict, dataclass
+import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from hermes_constants import get_hermes_home
 from transport import KiroHTTPError, request_json
 
+if TYPE_CHECKING:
+    from agent.credential_pool import PooledCredential
+
+PROVIDER = "kiro"
+SOURCE = "manual:kiro_device_code"
 _API_REGIONS = {"us-east-1", "eu-central-1"}
 _REGION_MAP = {
     "us-west-1": "us-east-1", "us-west-2": "us-east-1", "us-east-2": "us-east-1",
@@ -24,13 +28,17 @@ _REGION_MAP = {
 }
 _SCOPES = ["codewhisperer:completions", "codewhisperer:analysis", "codewhisperer:conversations"]
 _GRANTS = ["urn:ietf:params:oauth:grant-type:device_code", "refresh_token"]
+_TERMINAL_REFRESH_CODES = {"invalid_client", "invalid_grant", "invalid_token", "unauthorized_client"}
 BUILDER_ID_START_URL = "https://view.awsapps.com/start"
 _LOCK = Lock()
-_CACHED: dict[Path, "Credentials"] = {}
+_PROFILE_ARNS: dict[str, str] = {}
 
 
 class KiroAuthError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, code: str = "", status: int | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+        self.status = status
 
 
 @dataclass
@@ -44,14 +52,11 @@ class Credentials:
     expires_at: float
     client_secret_expires_at: float = 0.0
     profile_arn: str = ""
+    credential_id: str = ""
 
     @property
     def api_region(self) -> str:
         return runtime_region(self.region)
-
-    @property
-    def expiring(self) -> bool:
-        return time.time() >= self.expires_at - 300
 
     @property
     def is_builder_id(self) -> bool:
@@ -64,15 +69,8 @@ def hermes_home() -> Path:
 
 
 def credential_path() -> Path:
+    """Legacy credential path retained only for one-time migration."""
     return hermes_home() / "kiro" / "credentials.json"
-
-
-def _cached() -> Credentials | None:
-    return _CACHED.get(credential_path())
-
-
-def _cache(creds: Credentials) -> None:
-    _CACHED[credential_path()] = creds
 
 
 def runtime_region(region: str) -> str:
@@ -95,8 +93,18 @@ def validate_start_url(value: str) -> str:
 
 
 def _endpoint(region: str, path: str) -> str:
-    runtime_region(region)  # validate before the credential-bearing URL is built
+    runtime_region(region)
     return f"https://oidc.{region}.amazonaws.com/{path}"
+
+
+def _error_code(body: bytes) -> str:
+    try:
+        data = json.loads(body or b"{}")
+    except (TypeError, ValueError):
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    return str(data.get("error") or data.get("code") or data.get("reason") or "").strip().lower()
 
 
 def _post(region: str, path: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -108,83 +116,135 @@ def _post(region: str, path: str, payload: dict[str, Any]) -> dict[str, Any]:
             headers={"Content-Type": "application/json", "Accept": "application/json"},
         )
     except KiroHTTPError as exc:
-        raise KiroAuthError(f"AWS OIDC {path} failed ({exc.status}): {exc.body.decode('utf-8', 'replace')[:500]}") from exc
+        raise KiroAuthError(
+            f"AWS OIDC {path} failed ({exc.status}): {exc.body.decode('utf-8', 'replace')[:500]}",
+            code=_error_code(exc.body), status=exc.status,
+        ) from exc
     except Exception as exc:
+        if isinstance(exc, KiroAuthError):
+            raise
         raise KiroAuthError(f"AWS OIDC {path} is unreachable: {exc}") from exc
 
 
-def _write(creds: Credentials) -> None:
-    target = credential_path()
-    target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    fd, name = tempfile.mkstemp(prefix="credentials.", dir=target.parent)
-    try:
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(asdict(creds), handle)
-            handle.write("\n")
-        os.replace(name, target)
-    finally:
-        if os.path.exists(name):
-            os.unlink(name)
+def _entry_credentials(entry: PooledCredential) -> Credentials:
+    extra = entry.extra or {}
+    required = ("client_id", "client_secret", "region", "start_url")
+    missing = [key for key in required if not str(extra.get(key) or "").strip()]
+    if missing:
+        raise KiroAuthError(
+            "Kiro credential metadata is incomplete "
+            f"({', '.join(missing)}); run `hermes auth add kiro` again."
+        )
+    expires_at = float(entry.expires_at_ms or 0) / 1000.0
+    credential_id = entry.id
+    return Credentials(
+        access_token=entry.access_token,
+        refresh_token=entry.refresh_token or "",
+        client_id=str(extra["client_id"]),
+        client_secret=str(extra["client_secret"]),
+        region=str(extra["region"]),
+        start_url=str(extra["start_url"]),
+        expires_at=expires_at,
+        client_secret_expires_at=float(extra.get("client_secret_expires_at") or 0),
+        profile_arn=str(_PROFILE_ARNS.get(credential_id) or ""),
+        credential_id=credential_id,
+    )
 
 
-def save_credentials(creds: Credentials) -> None:
-    """Persist a token or IdC profile update made by the native transport."""
-    global _CACHED
-    _cache(creds)
-    _write(creds)
+def _pool_entry(creds: Credentials, *, label: str, source: str = SOURCE) -> PooledCredential:
+    from agent.credential_pool import AUTH_TYPE_OAUTH, PooledCredential
+
+    return PooledCredential(
+        provider=PROVIDER,
+        id=uuid.uuid4().hex[:6],
+        label=label,
+        auth_type=AUTH_TYPE_OAUTH,
+        priority=0,
+        source=source,
+        access_token=creds.access_token,
+        refresh_token=creds.refresh_token,
+        expires_at_ms=int(creds.expires_at * 1000),
+        extra={
+            "client_id": creds.client_id,
+            "client_secret": creds.client_secret,
+            "region": creds.region,
+            "start_url": creds.start_url,
+            "client_secret_expires_at": creds.client_secret_expires_at,
+        },
+    )
 
 
-def _read() -> Credentials:
+def persist_credentials(
+    creds: Credentials, *, label: str | None = None, priority: int | None = None, source: str = SOURCE
+) -> PooledCredential:
+    from agent.credential_pool import load_pool
+
+    pool = load_pool(PROVIDER)
+    label = (label or "").strip() or f"kiro-oauth-{len(pool.entries()) + 1}"
+    entry = pool.add_entry(_pool_entry(creds, label=label, source=source))
+    if priority is not None:
+        entry = pool.move_entry(entry.id, int(priority)) or entry
+    return entry
+
+
+def _read_legacy() -> Credentials:
     try:
         data = json.loads(credential_path().read_text())
         return Credentials(**data)
     except (OSError, TypeError, ValueError) as exc:
-        raise KiroAuthError("Kiro is not logged in. Run credentials.py login with your IAM Identity Center start URL.") from exc
+        raise KiroAuthError("Legacy Kiro credentials are unreadable; run `hermes auth add kiro` again.") from exc
 
 
-def _enable_provider() -> None:
-    env = hermes_home() / ".env"
-    line = "KIRO_AUTH=kiro-oauth-local"
-    existing = env.read_text() if env.exists() else ""
-    if not any(row.startswith("KIRO_AUTH=") for row in existing.splitlines()):
-        with env.open("a", encoding="utf-8") as handle:
-            if existing and not existing.endswith("\n"):
-                handle.write("\n")
-            handle.write(line + "\n")
-
-
-def _disable_provider() -> None:
+def _remove_legacy_sentinel() -> None:
     env = hermes_home() / ".env"
     if not env.exists():
         return
-    kept = [row for row in env.read_text().splitlines() if row != "KIRO_AUTH=kiro-oauth-local"]
-    env.write_text("\n".join(kept) + ("\n" if kept else ""))
+    rows = env.read_text().splitlines()
+    kept = [row for row in rows if row != "KIRO_AUTH=kiro-oauth-local"]
+    if kept != rows:
+        env.write_text("\n".join(kept) + ("\n" if kept else ""))
 
 
-def logout() -> bool:
-    """Forget only Hermes' native Kiro credentials and sentinel."""
-    global _CACHED
+def migrate_legacy_credentials() -> bool:
+    """Move the pre-native credentials.json row into auth.json exactly once."""
+    from hermes_cli.auth import _auth_store_lock, read_credential_pool
+
+    target = credential_path()
+    if not target.exists():
+        return False
     with _LOCK:
-        target = credential_path()
-        existed = target.exists()
-        target.unlink(missing_ok=True)
-        _CACHED.pop(target, None)
-        _disable_provider()
-        return existed
+        with _auth_store_lock():
+            if not target.exists() or read_credential_pool(PROVIDER):
+                return False
+            creds = _read_legacy()
+            # Remove the old fake API-key env row before load_pool() can seed it.
+            _remove_legacy_sentinel()
+            persist_credentials(creds, label="kiro-oauth-1", source="manual:kiro_legacy")
+            target.unlink()
+            return True
 
 
-def login(start_url: str = BUILDER_ID_START_URL, region: str = "us-east-1") -> tuple[str, str]:
-    """Run an IdC device-code login; returns the verification URL and user code."""
-    global _CACHED
+def remember_profile_arn(creds: Credentials) -> None:
+    """Cache discovered non-secret profile metadata without racing token rotation on disk."""
+    if creds.credential_id and creds.profile_arn:
+        _PROFILE_ARNS[creds.credential_id] = creds.profile_arn
+
+
+def _device_login(start_url: str, region: str) -> tuple[Credentials, str, str]:
     start_url = validate_start_url(start_url)
     runtime_region(region)
-    registration = _post(region, "client/register", {"clientName": "hermes-kiro", "clientType": "public", "scopes": _SCOPES, "grantTypes": _GRANTS, "issuerUrl": start_url})
+    registration = _post(region, "client/register", {
+        "clientName": "hermes-kiro", "clientType": "public", "scopes": _SCOPES,
+        "grantTypes": _GRANTS, "issuerUrl": start_url,
+    })
     client_id, client_secret = registration.get("clientId"), registration.get("clientSecret")
     if not client_id or not client_secret:
         raise KiroAuthError("AWS OIDC did not return a client registration")
-    device = _post(region, "device_authorization", {"clientId": client_id, "clientSecret": client_secret, "startUrl": start_url})
-    code, user_code, uri = device.get("deviceCode"), device.get("userCode"), device.get("verificationUriComplete") or device.get("verificationUri")
+    device = _post(region, "device_authorization", {
+        "clientId": client_id, "clientSecret": client_secret, "startUrl": start_url,
+    })
+    code, user_code = device.get("deviceCode"), device.get("userCode")
+    uri = device.get("verificationUriComplete") or device.get("verificationUri")
     if not code or not user_code or not uri:
         raise KiroAuthError("AWS OIDC did not return device authorization details")
     print(f"Open: {uri}\nCode: {user_code}", flush=True)
@@ -192,13 +252,15 @@ def login(start_url: str = BUILDER_ID_START_URL, region: str = "us-east-1") -> t
     interval = max(1.0, float(device.get("interval") or 5))
     while time.monotonic() < deadline:
         try:
-            token = _post(region, "token", {"clientId": client_id, "clientSecret": client_secret, "grantType": "urn:ietf:params:oauth:grant-type:device_code", "deviceCode": code})
+            token = _post(region, "token", {
+                "clientId": client_id, "clientSecret": client_secret,
+                "grantType": "urn:ietf:params:oauth:grant-type:device_code", "deviceCode": code,
+            })
         except KiroAuthError as exc:
-            text = str(exc)
-            if "authorization_pending" in text:
+            if exc.code == "authorization_pending":
                 time.sleep(interval)
                 continue
-            if "slow_down" in text:
+            if exc.code == "slow_down":
                 interval += 2
                 time.sleep(interval)
                 continue
@@ -206,10 +268,105 @@ def login(start_url: str = BUILDER_ID_START_URL, region: str = "us-east-1") -> t
         access, refresh = token.get("accessToken"), token.get("refreshToken")
         if not access or not refresh:
             raise KiroAuthError("AWS OIDC token response omitted access or refresh token")
-        save_credentials(Credentials(access, refresh, client_id, client_secret, region, start_url, time.time() + float(token.get("expiresIn") or 3600), float(registration.get("clientSecretExpiresAt") or 0)))
-        _enable_provider()
-        return str(uri), str(user_code)
+        creds = Credentials(
+            str(access), str(refresh), str(client_id), str(client_secret), region, start_url,
+            time.time() + float(token.get("expiresIn") or 3600),
+            float(registration.get("clientSecretExpiresAt") or 0),
+        )
+        return creds, str(uri), str(user_code)
     raise KiroAuthError("Device authorization expired; run login again")
+
+
+def login(
+    start_url: str = BUILDER_ID_START_URL,
+    region: str = "us-east-1",
+    *,
+    label: str | None = None,
+    priority: int | None = None,
+) -> tuple[str, str]:
+    """Run device authorization and save the resulting grant in Hermes' pool."""
+    creds, uri, user_code = _device_login(start_url, region)
+    persist_credentials(creds, label=label, priority=priority)
+    credential_path().unlink(missing_ok=True)
+    _remove_legacy_sentinel()
+    return uri, user_code
+
+
+def refresh_credential(entry: PooledCredential) -> dict[str, Any]:
+    """Rotate one pooled Kiro OAuth grant for Hermes' credential pool."""
+    from hermes_cli.auth_constants import AuthError
+
+    creds = _entry_credentials(entry)
+    if creds.client_secret_expires_at and time.time() >= creds.client_secret_expires_at:
+        raise AuthError(
+            "Kiro client registration expired; sign in again.",
+            provider=PROVIDER, code="invalid_client", relogin_required=True,
+        )
+    try:
+        token = _post(creds.region, "token", {
+            "clientId": creds.client_id,
+            "clientSecret": creds.client_secret,
+            "grantType": "refresh_token",
+            "refreshToken": creds.refresh_token,
+        })
+    except KiroAuthError as exc:
+        if exc.code in _TERMINAL_REFRESH_CODES:
+            raise AuthError(
+                str(exc), provider=PROVIDER, code=exc.code, relogin_required=True,
+            ) from exc
+        raise
+    access = token.get("accessToken")
+    if not access:
+        raise KiroAuthError("Kiro token refresh returned no access token")
+    return {
+        "access_token": str(access),
+        "refresh_token": str(token.get("refreshToken") or creds.refresh_token),
+        "expires_at_ms": int((time.time() + float(token.get("expiresIn") or 3600)) * 1000),
+    }
+
+
+def get_credentials(force_refresh: bool = False, stale_access_token: str = "") -> Credentials:
+    """Select a pooled credential and let Hermes serialize any needed refresh."""
+    from agent.credential_pool import load_pool
+
+    migrate_legacy_credentials()
+    pool = load_pool(PROVIDER)
+    entries = pool.entries()
+    if not entries:
+        raise KiroAuthError("Kiro is not logged in. Run `hermes auth add kiro`.")
+
+    entry = next((item for item in entries if stale_access_token and item.access_token == stale_access_token), None)
+    if force_refresh:
+        if entry is None:
+            current = pool.select()
+            if current is not None and stale_access_token and current.access_token != stale_access_token:
+                return _entry_credentials(current)
+            entry = current
+        refreshed = pool.try_refresh_matching(credential_id=entry.id if entry else None)
+        if refreshed is None:
+            raise KiroAuthError("Kiro sign-in could not be refreshed; run `hermes auth add kiro` again.")
+        return _entry_credentials(refreshed)
+
+    entry = pool.select()
+    if entry is None:
+        raise KiroAuthError("No Kiro credential is currently available; check `hermes auth list kiro`.")
+    if entry.expires_at_ms is not None and int(entry.expires_at_ms) <= int(time.time() * 1000) + 300_000:
+        entry = pool.try_refresh_matching(credential_id=entry.id)
+        if entry is None:
+            raise KiroAuthError("Kiro sign-in could not be refreshed; run `hermes auth add kiro` again.")
+    return _entry_credentials(entry)
+
+
+def logout() -> bool:
+    """Compatibility helper for the old standalone command; native logout is `hermes auth logout kiro`."""
+    from agent.credential_pool import load_pool
+    from hermes_cli.auth import clear_provider_auth
+
+    had_state = bool(load_pool(PROVIDER).entries() or credential_path().exists())
+    clear_provider_auth(PROVIDER)
+    credential_path().unlink(missing_ok=True)
+    _remove_legacy_sentinel()
+    return had_state
 
 
 def _next_login_choice(selected: int, key: str) -> int:
@@ -265,7 +422,7 @@ def _arrow_login_choice() -> str | None:
 
 
 def prompt_login_inputs(start_url: str | None, region: str | None, input_fn=input) -> tuple[str, str]:
-    """Resolve CLI flags interactively while preserving scriptable flags."""
+    """Resolve interactive IdC inputs; native `hermes auth` deliberately has no plugin-specific flags."""
     if start_url is None:
         choice = _arrow_login_choice() or input_fn("\nSelect login method:\n\n  1. AWS Builder ID\n  2. IAM Identity Center\n\nChoice [1]: ").strip()
         if choice not in {"", "1", "2"}:
@@ -276,40 +433,44 @@ def prompt_login_inputs(start_url: str | None, region: str | None, input_fn=inpu
     return start_url, region
 
 
-def get_credentials(force_refresh: bool = False, stale_access_token: str = "") -> Credentials:
-    """Return a valid token; concurrent stale requests refresh it once."""
-    global _CACHED
-    with _LOCK:
-        creds = _cached() or _read()
-        if creds.client_secret_expires_at and time.time() >= creds.client_secret_expires_at:
-            raise KiroAuthError("Kiro client registration expired; run login again")
-        if force_refresh and stale_access_token and creds.access_token != stale_access_token:
-            return creds
-        if not force_refresh and not creds.expiring:
-            _cache(creds)
-            return creds
-        token = _post(creds.region, "token", {"clientId": creds.client_id, "clientSecret": creds.client_secret, "grantType": "refresh_token", "refreshToken": creds.refresh_token})
-        access = token.get("accessToken")
-        if not access:
-            raise KiroAuthError("Kiro token refresh returned no access token; run login again")
-        creds.access_token = access
-        creds.refresh_token = token.get("refreshToken") or creds.refresh_token
-        creds.expires_at = time.time() + float(token.get("expiresIn") or 3600)
-        save_credentials(creds)
-        return creds
+def auth_handler(action: str, args: Any) -> bool:
+    """Own Kiro login; status/logout/refresh intentionally use Hermes' generic pool paths."""
+    if action == "logout":
+        credential_path().unlink(missing_ok=True)
+        _remove_legacy_sentinel()
+        return False
+    if action in {"status", "refresh"}:
+        try:
+            migrate_legacy_credentials()
+        except KiroAuthError:
+            pass
+        return False
+    if action != "add":
+        return False
+    requested_type = str(getattr(args, "auth_type", "") or "").strip().lower().replace("-", "_")
+    if requested_type and requested_type not in {"oauth", "oauth_device_code"}:
+        raise KiroAuthError("Kiro uses device-code OAuth; omit --type or use `--type oauth`.")
+    start_url, region = prompt_login_inputs(None, None)
+    login(
+        start_url,
+        region,
+        label=getattr(args, "label", None),
+        priority=getattr(args, "priority", None),
+    )
+    print("Added Kiro OAuth credentials to the Hermes credential pool.")
+    return True
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Hermes-native Kiro IdC login")
+    parser = argparse.ArgumentParser(description="Kiro IAM Identity Center authentication")
     sub = parser.add_subparsers(dest="command", required=True)
-    command = sub.add_parser("login")
-    command.add_argument("--start-url", help="IAM Identity Center URL; omit for interactive setup")
-    command.add_argument("--region", help="IAM Identity Center region; omit for interactive setup")
+    sub.add_parser("login")
     sub.add_parser("status")
     args = parser.parse_args()
     if args.command == "login":
-        login(*prompt_login_inputs(args.start_url, args.region))
-        print("Kiro login saved. Restart Hermes, then select provider kiro.")
+        start_url, region = prompt_login_inputs(None, None)
+        login(start_url, region)
+        print("Kiro login saved in Hermes' credential pool.")
     else:
         creds = get_credentials()
         print(f"logged in; IdC region={creds.region}; runtime region={creds.api_region}; expires_in={int(creds.expires_at-time.time())}s")

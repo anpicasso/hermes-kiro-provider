@@ -16,7 +16,7 @@ from capabilities import (
     additional_model_request_fields_supported,
     mark_additional_model_request_fields_unsupported,
 )
-from credentials import KiroAuthError, get_credentials, save_credentials
+from credentials import KiroAuthError, get_credentials, remember_profile_arn
 from transport import KiroHTTPError, request, request_json
 from translate import build_request
 
@@ -166,6 +166,67 @@ def format_usage(data: dict) -> str:
     return "\n".join(lines)
 
 
+def build_usage_snapshot(data: dict):
+    """Normalize Kiro allowances for Hermes' native ``/usage`` renderer."""
+    from agent.account_usage import AccountUsageSnapshot, AccountUsageWindow
+
+    buckets = data.get("usageBreakdownList") or []
+    if not isinstance(buckets, list):
+        return None
+    windows = []
+    details = []
+    for index, bucket in enumerate(buckets, 1):
+        if not isinstance(bucket, dict):
+            continue
+        try:
+            current = float(str(bucket.get("currentUsage")))
+            limit = float(str(bucket.get("usageLimit")))
+        except (TypeError, ValueError):
+            continue
+        included = min(max(current, 0.0), max(limit, 0.0))
+        used_percent = included / limit * 100 if limit > 0 else None
+        reset_at = None
+        try:
+            reset = float(str(bucket.get("nextDateReset")))
+            reset_at = datetime.fromtimestamp(reset / 1000 if reset > 10_000_000_000 else reset, tz=timezone.utc)
+        except (TypeError, ValueError, OSError):
+            pass
+        name = str(
+            bucket.get("displayName")
+            or bucket.get("usageType")
+            or bucket.get("resourceType")
+            or f"Allowance {index}"
+        )
+        windows.append(AccountUsageWindow(
+            label=name,
+            used_percent=used_percent,
+            reset_at=reset_at,
+            detail=f"{included:g}/{limit:g}",
+        ))
+        overage = bucket.get("currentOveragesWithPrecision", bucket.get("currentOverages"))
+        if overage is not None:
+            cap = bucket.get("overageCapWithPrecision", bucket.get("overageCap"))
+            charge = bucket.get("overageCharges")
+            currency = str(bucket.get("currency") or "USD")
+            text = f"{name} extra usage: {overage}"
+            if cap is not None:
+                text += f"/{cap}"
+            if charge is not None:
+                text += f"; {charge} {currency}"
+            details.append(text)
+    if not windows:
+        return None
+    return AccountUsageSnapshot(
+        provider="kiro",
+        source="kiro_usage_api",
+        fetched_at=datetime.now(timezone.utc),
+        title="Kiro usage",
+        windows=tuple(windows),
+        details=tuple(details),
+        raw=data,
+    )
+
+
 def _ensure_profile_arn(creds) -> str:
     """Discover the IdC profile once; Builder ID must not make this denied call."""
     if creds.profile_arn:
@@ -176,7 +237,7 @@ def _ensure_profile_arn(creds) -> str:
     for profile in data.get("profiles") or []:
         if isinstance(profile, dict) and (arn := str(profile.get("profileArn") or profile.get("arn") or "").strip()):
             creds.profile_arn = arn
-            save_credentials(creds)
+            remember_profile_arn(creds)
             return arn
     raise KiroAuthError("Kiro IAM Identity Center returned no profile ARN")
 

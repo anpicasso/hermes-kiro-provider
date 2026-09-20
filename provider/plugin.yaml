@@ -1,7 +1,8 @@
 name: kiro-provider
 kind: model-provider
-version: 0.1.7
-description: Native Kiro provider for Hermes using IAM Identity Center device authorization.
+version: 0.2.0
+requires_hermes: ">=0.21.3"
+description: Native Kiro provider with Hermes auth, usage, model catalog, and capability hooks.
 author: anpicasso
 python_dependencies:
   - botocore>=1.42,<2

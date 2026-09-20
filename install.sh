@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install the Hermes Kiro plugin (provider + its built-in commands). No gateway restart is performed.
+# Install the native Hermes Kiro model provider. No gateway restart is performed.
 set -euo pipefail
 
 SOURCE="anpicasso/hermes-kiro-provider"
@@ -68,7 +68,7 @@ cat <<'EOF'
 Kiro for Hermes is installed.
 
 Start a new terminal session, then authenticate:
-  hermes kiro login
+  hermes auth add kiro
 
 If the Hermes gateway is already running, restart it once so it loads the provider:
   systemctl --user restart hermes-gateway

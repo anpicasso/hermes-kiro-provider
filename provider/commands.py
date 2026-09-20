@@ -1,17 +1,13 @@
-"""`hermes kiro` / `/kiro` command surface, owned by the provider plugin.
+"""Legacy standalone Kiro auth/usage helper.
 
-Hermes skips ``kind: model-provider`` manifests in the command-plugin loader, so the provider's
-``register(ctx)`` is never called with a real context (see #111258). Registration therefore builds
-its own PluginContext in ``__init__.py``; that touches internal API, so it is wrapped and this
-module stays runnable on its own:
+Hermes now exposes the provider through ``hermes auth ... kiro`` and ``/usage``.
+This script remains only as a recovery path for installations upgrading from
+pre-native releases:
 
     python ~/.hermes/plugins/kiro-provider/commands.py {login|status|usage|logout}
-
-That fallback imports no Hermes plugin code at all, so it survives any change to the plugin API.
 """
 from __future__ import annotations
 
-import shlex
 import sys
 import time
 from pathlib import Path
@@ -20,11 +16,6 @@ _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:  # direct `python commands.py` run
     sys.path.insert(0, str(_HERE))
 
-FALLBACK_HINT = (
-    f"  python {_HERE / 'commands.py'} " + "{login|status|usage|logout}"
-)
-
-
 def _status_line() -> str:
     from credentials import get_credentials
     creds = get_credentials()
@@ -32,7 +23,7 @@ def _status_line() -> str:
             f"expires_in={int(creds.expires_at - time.time())}s")
 
 
-# --- argparse surface for `hermes kiro` -------------------------------------------------
+# --- legacy standalone argparse surface --------------------------------------------------
 
 def setup_parser(parser) -> None:
     sub = parser.add_subparsers(dest="kiro_command", required=True)
@@ -67,31 +58,6 @@ def handle(args) -> None:
         print("Kiro credentials removed." if logout() else "Kiro was already logged out.")
         return
     print(_status_line())
-
-
-# --- in-session `/kiro` -----------------------------------------------------------------
-
-def handle_slash(raw_args: str) -> str:
-    try:
-        parts = shlex.split(raw_args or "")
-    except ValueError as exc:
-        return f"Invalid Kiro command: {exc}"
-    action = parts[0] if parts else ""
-    if action == "status":
-        try:
-            return _status_line() + "."
-        except Exception as exc:
-            return f"Kiro is not logged in: {exc}"
-    if action == "usage":
-        try:
-            from client import format_usage, get_usage_limits
-            return format_usage(get_usage_limits())
-        except Exception as exc:
-            return f"Kiro usage failed: {exc}"
-    if action == "logout":
-        return "Logout changes local credentials; run `hermes kiro logout` in a terminal."
-    return ("Use `hermes kiro login` for AWS Builder ID or IAM Identity Center. "
-            "`/kiro status` and `/kiro usage` are available here.")
 
 
 # --- rescue entrypoint: no Hermes plugin API imports, works when registration fails -------
