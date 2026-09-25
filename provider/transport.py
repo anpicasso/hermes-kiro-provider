@@ -4,12 +4,17 @@ from __future__ import annotations
 import json
 from typing import Any
 
-import urllib3
+# Provider discovery may run before plugin dependencies are activated during an update.
+POOL = None
 
 
-# ponytail: one shared pool is enough for concurrent Hermes conversations;
-# split per-account pools only if the plugin gains multiple accounts/proxies.
-POOL = urllib3.PoolManager(num_pools=4, maxsize=20, block=True, retries=False)
+def _pool():
+    global POOL
+    import urllib3
+
+    if POOL is None:
+        POOL = urllib3.PoolManager(num_pools=4, maxsize=20, block=True, retries=False)
+    return urllib3, POOL
 
 
 class KiroHTTPError(RuntimeError):
@@ -21,7 +26,8 @@ class KiroHTTPError(RuntimeError):
 
 
 def request(method: str, url: str, *, body: bytes | None = None, headers: dict[str, str] | None = None, timeout: float = 30, stream: bool = False):
-    response = POOL.request(
+    urllib3, pool = _pool()
+    response = pool.request(
         method,
         url,
         body=body,

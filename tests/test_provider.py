@@ -4,6 +4,7 @@ import json
 import sys
 import asyncio
 import struct
+import subprocess
 import threading
 import time
 import zlib
@@ -90,6 +91,34 @@ def test_provider_client_still_constructs_after_companion_cleanup():
     """companion_error plumbing is gone; the client must construct and raise through normal paths."""
     instance = client.KiroClient()
     assert instance.api_key and instance.base_url
+
+
+def test_provider_registration_does_not_import_transport_dependencies(monkeypatch, tmp_path):
+    import hermes_constants
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    repo_root = Path(__file__).parents[1]
+    core_root = Path(hermes_constants.__file__).parent
+    script = f"""
+import builtins
+import sys
+sys.path[:0] = [{str(core_root)!r}, {str(repo_root)!r}]
+import hermes_bootstrap
+real_import = builtins.__import__
+def guarded_import(name, *args, **kwargs):
+    if name in ("botocore", "urllib3") or name.startswith(("botocore.", "urllib3.")):
+        raise ModuleNotFoundError(f"No module named '{{name}}'")
+    return real_import(name, *args, **kwargs)
+builtins.__import__ = guarded_import
+import provider
+assert provider.profile.name == "kiro"
+"""
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", script],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_new_model_catalog_fetches_and_falls_back_when_empty(monkeypatch, tmp_path):

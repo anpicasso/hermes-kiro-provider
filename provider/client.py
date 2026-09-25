@@ -10,8 +10,6 @@ import uuid
 from types import SimpleNamespace
 from typing import Any, Iterator
 
-from botocore.eventstream import EventStreamBuffer
-
 from capabilities import (
     additional_model_request_fields_supported,
     mark_additional_model_request_fields_unsupported,
@@ -354,6 +352,8 @@ class KiroClient:
                 retried_auth = True
         if response is None:
             raise KiroAuthError("Kiro runtime could not be reached")
+        from botocore.eventstream import EventStreamBuffer
+
         buffer = EventStreamBuffer()
         try:
             while raw := response.read(8192):

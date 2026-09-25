@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here.
 
+## [1.0.1] - 2026-09-25
+
+### Fixed
+
+- Deferred `botocore` and `urllib3` imports so Hermes can discover the provider while switching dependency environments during a source update.
+
 ## [1.0.0] - 2026-09-20
 
 ### Breaking
@@ -28,4 +34,5 @@ All notable changes to this project are documented here.
 - Custom `install.sh` installation flow.
 - Plugin-owned command-registration and credential-storage workarounds replaced by Hermes' native provider APIs.
 
+[1.0.1]: https://github.com/anpicasso/hermes-kiro-provider/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/anpicasso/hermes-kiro-provider/compare/v0.1.7...v1.0.0
