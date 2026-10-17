@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- AWS Builder ID sign-ins failed every chat request with `400 {"message":"profileArn is required for this request."}`. `GenerateAssistantResponse` always requires a `profileArn`; Builder ID cannot discover one (`ListAvailableProfiles` is `AccessDenied`), so runtime requests now send AWS' shared Builder ID profile ARN. Control-plane calls (model listing, usage) are unchanged.
+
 ## [1.0.1] - 2026-09-25
 
 ### Fixed

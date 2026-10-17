@@ -192,14 +192,23 @@ def test_event_decoder_handles_a_frame_split_mid_prelude(monkeypatch):
     assert list(instance._events({})) == [("assistantResponseEvent", {"content": "OK"})]
 
 
-def test_builder_id_request_omits_profile_arn(monkeypatch):
+def test_builder_id_request_uses_shared_profile_arn(monkeypatch):
+    """Builder ID cannot list profiles, but the runtime rejects a request without profileArn.
+
+    Regression: a Builder ID request sent with no profileArn fails with
+    ``400 {"message":"profileArn is required for this request."}``; AWS' shared Builder ID
+    placeholder ARN is what the runtime accepts.
+    """
     instance = client.KiroClient()
     captured = {}
+    calls = []
     creds = SimpleNamespace(api_region="us-east-1", access_token="token", profile_arn="", is_builder_id=True)
     monkeypatch.setattr(client, "get_credentials", lambda **_: creds)
+    monkeypatch.setattr(client, "_management", lambda *_: calls.append(True) or {})
     monkeypatch.setattr(client, "request", lambda method, url, **kwargs: captured.update(method=method, url=url, **kwargs) or SimpleNamespace())
     instance._open({"conversationState": {}})
-    assert "profileArn" not in json.loads(captured["body"])
+    assert json.loads(captured["body"])["profileArn"] == client._BUILDER_ID_PROFILE_ARN
+    assert not calls, "Builder ID must not attempt the denied ListAvailableProfiles call"
 
 
 def test_idc_discovers_profile_arn_without_prompting(monkeypatch):

@@ -225,6 +225,9 @@ def build_usage_snapshot(data: dict):
     )
 
 
+_BUILDER_ID_PROFILE_ARN = "arn:aws:codewhisperer:us-east-1:638616132270:profile/AAAACCCCXXXX"
+
+
 def _ensure_profile_arn(creds) -> str:
     """Discover the IdC profile once; Builder ID must not make this denied call."""
     if creds.profile_arn:
@@ -238,6 +241,19 @@ def _ensure_profile_arn(creds) -> str:
             remember_profile_arn(creds)
             return arn
     raise KiroAuthError("Kiro IAM Identity Center returned no profile ARN")
+
+
+def _runtime_profile_arn(creds) -> str:
+    """profileArn for GenerateAssistantResponse: discovered for IdC, AWS' shared one for Builder ID.
+
+    Builder ID accounts get AccessDenied from ListAvailableProfiles, but the runtime rejects
+    *any* request without a profileArn (``400 {"message":"profileArn is required for this
+    request."}``). AWS ships a single shared Builder ID profile ARN, and the control-plane
+    calls keep working without one, so only the runtime call needs it.
+    """
+    if arn := _ensure_profile_arn(creds):
+        return arn
+    return _BUILDER_ID_PROFILE_ARN if getattr(creds, "is_builder_id", False) else ""
 
 
 def _chunk(model: str, delta: dict, finish: str | None = None) -> SimpleNamespace:
@@ -300,7 +316,7 @@ class KiroClient:
     def _open(self, body: dict, force_refresh: bool = False, stale_access_token: str = ""):
         creds = get_credentials(force_refresh=force_refresh, stale_access_token=stale_access_token)
         # ponytail: Builder ID rejects profile discovery; corporate IdC requires the discovered ARN.
-        if profile_arn := _ensure_profile_arn(creds):
+        if profile_arn := _runtime_profile_arn(creds):
             body["profileArn"] = profile_arn
         headers = _headers(
             creds,
