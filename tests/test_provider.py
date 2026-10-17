@@ -507,7 +507,11 @@ def test_parallel_tool_results_share_one_user_turn():
     assert len(state["currentMessage"]["userInputMessage"]["userInputMessageContext"]["toolResults"]) == 2
 
 
-def test_unsupported_additional_fields_are_cached_and_retried_once(monkeypatch, tmp_path):
+@pytest.mark.parametrize("message", [
+    "additionalModelRequestFields is not supported for this model",
+    "Invalid additionalModelRequestFields: property 'enabled' is not defined in the schema and the schema does not allow additional properties",
+])
+def test_unsupported_additional_fields_are_cached_and_retried_once(monkeypatch, tmp_path, message):
     from hermes_constants import reset_hermes_home_override, set_hermes_home_override
 
     import capabilities
@@ -522,7 +526,7 @@ def test_unsupported_additional_fields_are_cached_and_retried_once(monkeypatch, 
             if len(bodies) == 1:
                 raise client.KiroHTTPError(400, json.dumps({
                     "reason": "REQUEST_BODY_INVALID",
-                    "message": "additionalModelRequestFields is not supported for this model",
+                    "message": message,
                 }).encode())
             return SimpleNamespace(read=lambda _: b"", release_conn=lambda: None)
 
