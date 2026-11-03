@@ -230,6 +230,24 @@ def test_builder_id_uses_live_bare_model_catalog_and_usage(monkeypatch):
     assert "3/10 (30%)" in client.format_usage({"usageBreakdownList": [{"usageType": "Agent", "currentUsage": 3, "usageLimit": 10}]})
 
 
+def test_rest_requests_use_the_account_region_host(monkeypatch):
+    urls = []
+    monkeypatch.setattr(client, "request_json", lambda method, url, **_: urls.append(url) or {})
+    for region in ("us-east-1", "eu-central-1"):
+        client._rest(SimpleNamespace(api_region=region, access_token="token"), "getUsageLimits", {"origin": "AI_EDITOR"})
+    assert urls == [
+        "https://codewhisperer.us-east-1.amazonaws.com/getUsageLimits?origin=AI_EDITOR",
+        "https://q.eu-central-1.amazonaws.com/getUsageLimits?origin=AI_EDITOR",
+    ]
+
+
+def test_model_discovery_failure_falls_back_and_logs(monkeypatch, caplog):
+    monkeypatch.setattr(client, "get_credentials", lambda **_: (_ for _ in ()).throw(RuntimeError("boom")))
+    with caplog.at_level("WARNING"):
+        assert client.list_model_ids() == list(client._FALLBACK)
+    assert "boom" in caplog.text
+
+
 def test_usage_splits_included_credit_from_overage():
     usage = client.format_usage({"usageBreakdownList": [{
         "displayName": "Credit", "displayNamePlural": "Credits",

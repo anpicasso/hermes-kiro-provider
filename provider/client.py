@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from datetime import datetime, timezone
 import urllib.parse
@@ -18,6 +19,7 @@ from credentials import KiroAuthError, get_credentials, remember_profile_arn
 from transport import KiroHTTPError, request, request_json
 from translate import build_request
 
+_LOG = logging.getLogger(__name__)
 _FALLBACK = ("claude-sonnet-4.5", "claude-haiku-4.5", "gpt-5.6-terra")
 _END = object()
 _UNSUPPORTED_ADDITIONAL_FIELDS = "additionalModelRequestFields is not supported for this model"
@@ -83,10 +85,15 @@ def _management(creds, target: str, payload: dict) -> dict:
     )
 
 
+def _rest_host(region: str) -> str:
+    """us-east-1 keeps its historical host; other regions are served by q.<region>."""
+    return "codewhisperer.us-east-1.amazonaws.com" if region == "us-east-1" else f"q.{region}.amazonaws.com"
+
+
 def _rest(creds, path: str, query: dict[str, str]) -> dict:
     return request_json(
         "GET",
-        f"https://codewhisperer.us-east-1.amazonaws.com/{path}?{urllib.parse.urlencode(query)}",
+        f"https://{_rest_host(creds.api_region)}/{path}?{urllib.parse.urlencode(query)}",
         headers=_headers(creds),
     )
 
@@ -100,8 +107,11 @@ def list_model_ids() -> list[str]:
             query["profileArn"] = profile_arn
         data = _rest(creds, "ListAvailableModels", query)
         models = [str(m["modelId"]) for m in data.get("models") or [] if isinstance(m, dict) and isinstance(m.get("modelId"), str)]
+        if not models:
+            _LOG.warning("Kiro returned no models; using the built-in fallback list.")
         return models or list(_FALLBACK)
-    except Exception:
+    except Exception as exc:
+        _LOG.warning("Kiro model discovery failed (%s); using the built-in fallback list.", exc)
         return list(_FALLBACK)
 
 
