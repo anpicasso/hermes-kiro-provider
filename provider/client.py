@@ -20,7 +20,11 @@ from translate import build_request
 
 _FALLBACK = ("claude-sonnet-4.5", "claude-haiku-4.5", "gpt-5.6-terra")
 _END = object()
-_UNSUPPORTED_ADDITIONAL_FIELDS = "additionalModelRequestFields is not supported for this model"
+# Kiro reports a model that cannot take additionalModelRequestFields in two shapes:
+#   "...additionalModelRequestFields is not supported for this model"  (older models)
+#   "Invalid additionalModelRequestFields: property 'enabled' is not defined in the schema..."  (4.6+)
+# Both arrive with reason REQUEST_BODY_INVALID, so match on the field name rather than one sentence.
+_ADDITIONAL_FIELDS_KEY = "additionalmodelrequestfields"
 # The branded runtime gateway rejects a profileArn-less Builder ID request with
 # 400 "profileArn is required for this request". Builder ID has no discoverable
 # profile, so official clients send this fixed placeholder on streaming calls
@@ -57,7 +61,7 @@ def _rejects_additional_model_request_fields(exc: KiroHTTPError) -> bool:
 
     values = list(strings(payload))
     return "REQUEST_BODY_INVALID" in values and any(
-        _UNSUPPORTED_ADDITIONAL_FIELDS.casefold() in value.casefold() for value in values
+        _ADDITIONAL_FIELDS_KEY in value.casefold() for value in values
     )
 
 
