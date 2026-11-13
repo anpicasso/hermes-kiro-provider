@@ -8,6 +8,41 @@ from typing import Any
 _EMPTY = "Please proceed with the task."
 _TOOL = "Tool results provided."
 _EMPTY_SCHEMA = {"type": "object", "properties": {}}
+_SCHEMA_MAPS = frozenset({"properties", "patternProperties", "$defs", "definitions", "dependentSchemas"})
+_SCHEMA_LISTS = frozenset({"allOf", "anyOf", "oneOf", "prefixItems"})
+_SCHEMA_CHILDREN = frozenset({
+    "items", "additionalItems", "contains", "propertyNames", "not",
+    "if", "then", "else", "unevaluatedItems", "unevaluatedProperties",
+})
+
+
+def _sanitize_schema(schema: Any) -> Any:
+    """Drop JSON-Schema keys Kiro rejects with 400 REQUEST_BODY_INVALID.
+
+    Kiro refuses any tool schema carrying ``additionalProperties`` (either
+    value) and an empty ``required`` array; Hermes schemas include both.
+    Neither key is needed for tool dispatch, so strip them recursively.
+    Only schema-bearing keywords are traversed, so a property literally named
+    ``additionalProperties``/``required`` and ``const``/``enum`` payloads
+    survive untouched.
+    """
+    if not isinstance(schema, dict):
+        return schema
+    cleaned: dict[str, Any] = {}
+    for key, value in schema.items():
+        if key == "additionalProperties":
+            continue
+        if key == "required" and isinstance(value, (list, tuple)) and not value:
+            continue
+        if key in _SCHEMA_MAPS and isinstance(value, dict):
+            cleaned[key] = {name: _sanitize_schema(child) for name, child in value.items()}
+        elif (key in _SCHEMA_LISTS or key == "items") and isinstance(value, list):
+            cleaned[key] = [_sanitize_schema(child) for child in value]
+        elif key in _SCHEMA_CHILDREN:
+            cleaned[key] = _sanitize_schema(value)
+        else:
+            cleaned[key] = value
+    return cleaned
 
 
 def _text(content: Any) -> str:
@@ -25,7 +60,7 @@ def _tool_specs(tools: Any, messages: list[dict]) -> list[dict]:
         fn = tool.get("function", {}) if isinstance(tool, dict) else {}
         name = fn.get("name")
         if name:
-            specs[name] = {"toolSpecification": {"name": name, "description": fn.get("description") or name, "inputSchema": {"json": fn.get("parameters") or _EMPTY_SCHEMA}}}
+            specs[name] = {"toolSpecification": {"name": name, "description": fn.get("description") or name, "inputSchema": {"json": _sanitize_schema(fn.get("parameters") or _EMPTY_SCHEMA)}}}
     for message in messages:
         for call in message.get("tool_calls") or []:
             fn = call.get("function") or {}

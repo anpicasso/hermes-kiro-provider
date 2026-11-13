@@ -21,6 +21,12 @@ from translate import build_request
 _FALLBACK = ("claude-sonnet-4.5", "claude-haiku-4.5", "gpt-5.6-terra")
 _END = object()
 _UNSUPPORTED_ADDITIONAL_FIELDS = "additionalModelRequestFields is not supported for this model"
+# The branded runtime gateway rejects a profileArn-less Builder ID request with
+# 400 "profileArn is required for this request". Builder ID has no discoverable
+# profile, so official clients send this fixed placeholder on streaming calls
+# (embedded in the official kiro-cli 2.8.0 binary, fig_api_client::profile_resolver).
+# Do not attach it to REST calls: ListAvailableModels/getUsageLimits reject it.
+BUILDER_ID_PROFILE_ARN = "arn:aws:codewhisperer:us-east-1:638616132270:profile/AAAACCCCXXXX"
 
 
 def _model_id(body: dict) -> str:
@@ -302,6 +308,8 @@ class KiroClient:
         # ponytail: Builder ID rejects profile discovery; corporate IdC requires the discovered ARN.
         if profile_arn := _ensure_profile_arn(creds):
             body["profileArn"] = profile_arn
+        elif getattr(creds, "is_builder_id", False):
+            body["profileArn"] = BUILDER_ID_PROFILE_ARN
         headers = _headers(
             creds,
             accept="application/vnd.amazon.eventstream",
@@ -347,7 +355,7 @@ class KiroClient:
                     retried_without_additional_fields = True
                     continue
                 if exc.status not in (401, 403) or retried_auth:
-                    raise KiroAuthError(f"Kiro runtime failed ({exc.status}): {exc.body.decode('utf-8', 'replace')[:500]}") from exc
+                    raise KiroAuthError(f"Kiro runtime failed ({exc.status}): {exc.body.decode('utf-8', 'replace')[:500]}", status=exc.status) from exc
                 stale_access_token = exc.access_token
                 retried_auth = True
         if response is None:
@@ -424,6 +432,8 @@ class KiroClient:
                     tools_sent = sent = True
                 yield _chunk(model, {}, "tool_calls")
                 return
+            elif event == "metadataEvent" and str(data.get("stopReason") or "").upper() == "CONTENT_FILTERED":
+                raise KiroAuthError("Kiro declined the request (CONTENT_FILTERED)")
             elif event in {"error", "exception"} or data.get("error"):
                 raise KiroAuthError(f"Kiro stream error: {data.get('message') or data.get('error')}")
         if calls:

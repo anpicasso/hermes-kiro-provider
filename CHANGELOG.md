@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- Builder ID streaming requests now send the fixed Builder ID profile ARN that `runtime.*.kiro.dev` requires; the gateway otherwise rejects them with `400 profileArn is required for this request`.
+- Tool schemas are stripped of `additionalProperties` and empty `required` arrays, which Kiro rejects with `400 REQUEST_BODY_INVALID`.
+- A `CONTENT_FILTERED` stream stop is surfaced as an error instead of a normal completion.
+- Provider errors expose the upstream HTTP status as `status_code` for Hermes' failover classifiers.
+- The compatibility logout helper clears only the Kiro pool, removing a private `hermes_cli` import.
+
 ## [1.0.1] - 2026-09-25
 
 ### Fixed

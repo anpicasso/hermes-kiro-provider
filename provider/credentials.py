@@ -38,6 +38,9 @@ class KiroAuthError(RuntimeError):
         super().__init__(message)
         self.code = code
         self.status = status
+        # Hermes' main/auxiliary error matchers read ``status_code`` first; keep
+        # the HTTP status visible even though this facade is not an SDK error.
+        self.status_code = status
 
 
 @dataclass
@@ -320,10 +323,11 @@ def get_credentials(force_refresh: bool = False, stale_access_token: str = "") -
 def logout() -> bool:
     """Compatibility helper for the old standalone command; native logout is `hermes auth logout kiro`."""
     from agent.credential_pool import load_pool
-    from hermes_cli.auth import clear_provider_auth
 
-    had_state = bool(load_pool(PROVIDER).entries())
-    clear_provider_auth(PROVIDER)
+    pool = load_pool(PROVIDER)
+    had_state = bool(pool.entries())
+    while pool.entries():
+        pool.remove_index(1)
     return had_state
 
 

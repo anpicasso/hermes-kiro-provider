@@ -87,6 +87,27 @@ def test_empty_success_stream_is_an_error(monkeypatch):
         list(instance.chat.completions.create(model="claude-sonnet-4.5", messages=[{"role": "user", "content": "hi"}], stream=True))
 
 
+def test_content_filtered_stream_is_an_error(monkeypatch):
+    instance = client.KiroClient()
+    monkeypatch.setattr(instance, "_events", lambda _: iter([
+        ("metadataEvent", {"stopReason": "CONTENT_FILTERED"}),
+    ]))
+    with pytest.raises(KiroAuthError, match="CONTENT_FILTERED"):
+        list(instance.chat.completions.create(model="claude-sonnet-4.5", messages=[{"role": "user", "content": "hi"}], stream=True))
+
+
+def test_http_status_is_visible_to_host_matchers(monkeypatch):
+    error = KiroAuthError("rate limited", status=429)
+    assert (error.status, error.status_code) == (429, 429)
+    instance = client.KiroClient()
+    def rejected(*args, **kwargs):
+        raise client.KiroHTTPError(429, b"rate limited")
+    monkeypatch.setattr(instance, "_open", rejected)
+    with pytest.raises(KiroAuthError) as caught:
+        list(instance._events({}))
+    assert caught.value.status_code == 429
+
+
 def test_provider_client_still_constructs_after_companion_cleanup():
     """companion_error plumbing is gone; the client must construct and raise through normal paths."""
     instance = client.KiroClient()
@@ -192,14 +213,15 @@ def test_event_decoder_handles_a_frame_split_mid_prelude(monkeypatch):
     assert list(instance._events({})) == [("assistantResponseEvent", {"content": "OK"})]
 
 
-def test_builder_id_request_omits_profile_arn(monkeypatch):
+def test_builder_id_streams_fixed_profile_arn(monkeypatch):
     instance = client.KiroClient()
     captured = {}
     creds = SimpleNamespace(api_region="us-east-1", access_token="token", profile_arn="", is_builder_id=True)
     monkeypatch.setattr(client, "get_credentials", lambda **_: creds)
     monkeypatch.setattr(client, "request", lambda method, url, **kwargs: captured.update(method=method, url=url, **kwargs) or SimpleNamespace())
     instance._open({"conversationState": {}})
-    assert "profileArn" not in json.loads(captured["body"])
+    # The branded runtime gateway requires an ARN even though Builder ID has no profile.
+    assert json.loads(captured["body"])["profileArn"] == client.BUILDER_ID_PROFILE_ARN
 
 
 def test_idc_discovers_profile_arn_without_prompting(monkeypatch):
@@ -496,6 +518,61 @@ def test_parallel_tool_results_share_one_user_turn():
     assert len(state["history"]) == 2
     assert [item["text"] for item in state["currentMessage"]["userInputMessage"]["userInputMessageContext"]["toolResults"][0]["content"]] == ["x"]
     assert len(state["currentMessage"]["userInputMessage"]["userInputMessageContext"]["toolResults"]) == 2
+
+
+def test_tool_schemas_strip_fields_kiro_rejects():
+    parameters = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": [],
+        "properties": {
+            "path": {"type": "string", "additionalProperties": True},
+            "options": {"type": "object", "required": ["deep"], "properties": {"deep": {"type": "boolean"}}},
+        },
+    }
+    request = build_request([
+        {"role": "user", "content": "Read x"},
+    ], [{"type": "function", "function": {"name": "read_file", "description": "Read", "parameters": parameters}}],
+        "claude-sonnet-4.5", None, "c")
+    spec = request["conversationState"]["currentMessage"]["userInputMessage"]["userInputMessageContext"]["tools"][0]["toolSpecification"]
+    encoded = json.dumps(spec)
+    assert "additionalProperties" not in encoded
+    assert '"required": []' not in encoded
+    assert spec["inputSchema"]["json"]["properties"]["options"]["required"] == ["deep"]
+    assert parameters["additionalProperties"] is False  # caller's schema is not mutated
+
+
+def test_schema_sanitizer_preserves_property_names_and_const_payloads():
+    parameters = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": [],
+        "properties": {
+            "additionalProperties": {"type": "string"},
+            "required": {"type": "boolean"},
+            "mode": {"const": {"additionalProperties": False, "required": []}},
+            "kind": {"enum": [{"additionalProperties": True, "required": []}]},
+            "options": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [],
+                "properties": {"required": {"type": "string"}},
+            },
+        },
+    }
+    request = build_request([
+        {"role": "user", "content": "Read x"},
+    ], [{"type": "function", "function": {"name": "read_file", "description": "Read", "parameters": parameters}}],
+        "claude-sonnet-4.5", None, "c")
+    schema = request["conversationState"]["currentMessage"]["userInputMessage"]["userInputMessageContext"]["tools"][0]["toolSpecification"]["inputSchema"]["json"]
+    assert set(schema["properties"]) == {"additionalProperties", "required", "mode", "kind", "options"}
+    assert schema["properties"]["additionalProperties"] == {"type": "string"}
+    assert schema["properties"]["required"] == {"type": "boolean"}
+    assert schema["properties"]["mode"]["const"] == {"additionalProperties": False, "required": []}
+    assert schema["properties"]["kind"]["enum"] == [{"additionalProperties": True, "required": []}]
+    assert "additionalProperties" not in schema["properties"]["options"]
+    assert "required" not in schema["properties"]["options"]
+    assert schema["properties"]["options"]["properties"] == {"required": {"type": "string"}}
 
 
 def test_unsupported_additional_fields_are_cached_and_retried_once(monkeypatch, tmp_path):
