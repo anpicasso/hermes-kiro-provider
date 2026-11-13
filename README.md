@@ -41,7 +41,7 @@ The plugin no longer reads the old `$HERMES_HOME/kiro/credentials.json` file, th
 
 ## Install
 
-Use Hermes' built-in plugin installer (Hermes Agent 0.21.3 or newer):
+Use Hermes' built-in plugin installer (Hermes Agent 0.23.1 or newer):
 
 ```bash
 hermes plugins install kiro-provider
