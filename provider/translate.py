@@ -1,6 +1,8 @@
 """Small OpenAI-chat to Kiro conversationState translation layer."""
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import uuid
 from typing import Any
@@ -53,6 +55,44 @@ def _text(content: Any) -> str:
     return ""
 
 
+# Kiro's ImageBlock formats (Bedrock Converse names); OpenAI parts carry a MIME type.
+_IMAGE_FORMATS = {"image/png": "png", "image/jpeg": "jpeg", "image/jpg": "jpeg", "image/gif": "gif", "image/webp": "webp"}
+
+
+def _image_block(part: Any) -> dict | None:
+    """OpenAI ``image_url`` part with a base64 data URL -> Kiro image block; anything else -> None.
+
+    Remote http(s) URLs are skipped: Kiro only takes inline bytes, and Hermes' vision tools
+    already inline local and fetched images as data URLs before they reach the provider.
+    """
+    if not isinstance(part, dict) or part.get("type") not in {"image_url", "input_image"}:
+        return None
+    url = part.get("image_url")
+    url = url.get("url") if isinstance(url, dict) else url
+    if not isinstance(url, str) or not url.startswith("data:") or "," not in url:
+        return None
+    header, data = url[5:].split(",", 1)
+    mime, _, encoding = header.partition(";")
+    fmt = _IMAGE_FORMATS.get(mime.strip().lower())
+    if fmt is None or encoding.strip().lower() != "base64":
+        return None
+    try:
+        base64.b64decode(data, validate=True)
+    except (binascii.Error, ValueError):
+        return None
+    return {"format": fmt, "source": {"bytes": data}}
+
+
+def _images(*messages: dict) -> list[dict]:
+    """Image blocks from the content lists of ``messages``, in order."""
+    blocks: list[dict] = []
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, list):
+            blocks.extend(block for part in content if (block := _image_block(part)) is not None)
+    return blocks
+
+
 def _tool_specs(tools: Any, messages: list[dict]) -> list[dict]:
     """Keep definitions for replayed tool calls; Kiro rejects orphaned results."""
     specs: dict[str, dict] = {}
@@ -90,7 +130,10 @@ def _tool_result(message: dict) -> dict:
 
 
 def _tool_turn(messages: list[dict], model: str) -> dict:
-    return {"userInputMessage": {"content": _TOOL, "modelId": model, "origin": "KIRO_CLI", "userInputMessageContext": {"toolResults": [_tool_result(message) for message in messages]}}}
+    item: dict[str, Any] = {"content": _TOOL, "modelId": model, "origin": "KIRO_CLI", "userInputMessageContext": {"toolResults": [_tool_result(message) for message in messages]}}
+    if images := _images(*messages):
+        item["images"] = images
+    return {"userInputMessage": item}
 
 
 def build_request(messages: list[dict], tools: Any, model: str, effort: dict | None, conversation_id: str | None = None) -> dict:
@@ -115,7 +158,10 @@ def build_request(messages: list[dict], tools: Any, model: str, effort: dict | N
                 content = f"{system_pending}\n\n{content}".strip()
                 system_pending = ""
             content = content or _EMPTY
-            history.append({"userInputMessage": {"content": content, "modelId": model, "origin": "KIRO_CLI"}})
+            item = {"content": content, "modelId": model, "origin": "KIRO_CLI"}
+            if images := _images(message):
+                item["images"] = images
+            history.append({"userInputMessage": item})
         elif role == "tool":
             grouped = [message]
             while index + 1 < len(conversation) and conversation[index + 1].get("role") == "tool":
@@ -134,6 +180,8 @@ def build_request(messages: list[dict], tools: Any, model: str, effort: dict | N
             content = f"{system_pending}\n\n{content}".strip()
         content = content or _EMPTY
         user = {"content": content, "modelId": model, "origin": "KIRO_CLI"}
+    if images := _images(*(current_tools or [current])):
+        user["images"] = images
     if specs := _tool_specs(tools, conversation + current_tools + ([] if current_tools else [current])):
         context["tools"] = specs
     if context:

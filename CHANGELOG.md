@@ -4,6 +4,10 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- Base64 `image_url` / `input_image` parts are forwarded as Kiro image blocks on current, history and tool-result turns; Claude and GPT catalog models declare vision, while other families stay text-only.
+
 ### Fixed
 
 - Builder ID streaming requests now send the fixed Builder ID profile ARN that `runtime.*.kiro.dev` requires; the gateway otherwise rejects them with `400 profileArn is required for this request`.
@@ -11,6 +15,8 @@ All notable changes to this project are documented here.
 - A `CONTENT_FILTERED` stream stop is surfaced as an error instead of a normal completion.
 - Provider errors expose the upstream HTTP status as `status_code` for Hermes' failover classifiers.
 - The compatibility logout helper clears only the Kiro pool, removing a private `hermes_cli` import.
+- Control-plane REST calls use the account region (`q.<region>.amazonaws.com` outside `us-east-1`) instead of a hardcoded `us-east-1` host, and model-discovery fallback is logged.
+- Kiro's schema-invalid `additionalModelRequestFields` 400 is retried without the fields and the model is marked unsupported, instead of failing the request.
 
 ## [1.0.1] - 2026-09-25
 
