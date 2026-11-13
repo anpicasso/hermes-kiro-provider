@@ -8,7 +8,7 @@ Native Kiro model-provider plugin for Hermes. It connects directly to Kiro over 
 - **Credential storage:** OAuth tokens and Kiro metadata live in Hermes' profile-scoped `auth.json` credential pool, including multi-account priority and safe cross-process refresh
 - **Usage:** the normal `/usage` command renders Kiro allowances and reset times
 - **Models:** live Kiro models appear in main and auxiliary model pickers, with curated offline fallbacks
-- **Capabilities:** Hermes knows the bundled fallback models support tools and are text-only
+- **Capabilities:** Hermes knows which bundled fallback models support tools; Claude and GPT models also declare vision, while DeepSeek, MiniMax, GLM and Qwen stay text-only
 - **Transport:** direct Kiro event streams, tool calls/results, and automatic 401 recovery
 
 ```mermaid

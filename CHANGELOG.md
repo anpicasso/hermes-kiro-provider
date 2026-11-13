@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented here.
 
-## [Unreleased]
+## [1.1.0] - 2026-11-13
 
 ### Added
 
@@ -52,5 +52,6 @@ All notable changes to this project are documented here.
 - Custom `install.sh` installation flow.
 - Plugin-owned command-registration and credential-storage workarounds replaced by Hermes' native provider APIs.
 
+[1.1.0]: https://github.com/anpicasso/hermes-kiro-provider/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/anpicasso/hermes-kiro-provider/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/anpicasso/hermes-kiro-provider/compare/v0.1.7...v1.0.0
