@@ -898,3 +898,72 @@ def test_concurrent_capability_updates_keep_all_models(monkeypatch, tmp_path):
         assert set(json.loads(cache_file.read_text())["additionalModelRequestFieldsUnsupportedModels"]) == {"one", "two"}
     finally:
         reset_hermes_home_override(token)
+
+
+def test_sync_caller_inside_running_loop_gets_a_real_response(monkeypatch):
+    """Hermes auxiliary tasks (e.g. title generation) call the sync client from a thread with a running loop."""
+    instance = client.KiroClient()
+    monkeypatch.setattr(instance, "_events", lambda _: iter([("assistantResponseEvent", {"content": "OK"})]))
+
+    async def run():
+        response = instance.chat.completions.create(model="claude-sonnet-4.5", messages=[{"role": "user", "content": "hi"}])
+        return response.choices[0].message.content
+
+    assert asyncio.run(run()) == "OK"
+
+
+@pytest.mark.parametrize(
+    ("model", "config", "expected"),
+    [
+        ("claude-haiku-5.5", {"enabled": False}, {"thinking": {"type": "disabled"}}),
+        ("claude-haiku-5.5", {"enabled": True, "effort": "medium"}, {"thinking": {"type": "adaptive"}, "output_config": {"effort": "medium"}}),
+        ("claude-opus-5.5", {"effort": "ultra"}, {"thinking": {"type": "adaptive"}, "output_config": {"effort": "max"}}),
+        ("claude-sonnet-5.5", {"effort": "minimal"}, {"thinking": {"type": "adaptive"}, "output_config": {"effort": "low"}}),
+        ("gpt-5.6-terra", {"enabled": False}, {"reasoning": {"effort": "none"}}),
+        ("gpt-5.6-terra", {"effort": "high"}, {"reasoning": {"effort": "high"}}),
+        ("minimax-m2.5", {"enabled": False}, None),
+        ("claude-haiku-5.5", {"thinking": {"type": "adaptive"}}, {"thinking": {"type": "adaptive"}}),
+        ("claude-haiku-5.5", None, None),
+        ("compatible-model", {"reasoningEffort": "high"}, {"reasoningEffort": "high"}),
+    ],
+)
+def test_generic_reasoning_config_maps_to_kiro_schema(model, config, expected):
+    """Hermes sends ``{"enabled", "effort"}``; Kiro 400s on anything but its per-family fields."""
+    assert client._kiro_reasoning_fields(model, config) == expected
+
+
+def test_title_style_disabled_thinking_reaches_wire_in_kiro_shape(monkeypatch):
+    instance = client.KiroClient()
+    bodies = []
+
+    def fake_events(body):
+        bodies.append(body)
+        yield "assistantResponseEvent", {"content": "OK"}
+
+    monkeypatch.setattr(instance, "_events", fake_events)
+    response = instance.chat.completions.create(
+        model="claude-haiku-5.5",
+        messages=[{"role": "user", "content": "hi"}],
+        extra_body={"reasoning": {"enabled": False}},
+    )
+    assert response.choices[0].message.content == "OK"
+    assert bodies[0]["additionalModelRequestFields"] == {"thinking": {"type": "disabled"}}
+
+
+def test_model_without_disabled_thinking_retries_adaptive_low(monkeypatch):
+    instance = client.KiroClient()
+    bodies = []
+
+    def fake_open(body, **_):
+        bodies.append(body)
+        if len(bodies) == 1:
+            raise client.KiroHTTPError(400, json.dumps({
+                "reason": "REQUEST_BODY_INVALID",
+                "message": 'Invalid additionalModelRequestFields: does not have a value in the enumeration ["adaptive"]',
+            }).encode())
+        return SimpleNamespace(read=lambda _: b"", release_conn=lambda: None)
+
+    monkeypatch.setattr(instance, "_open", fake_open)
+    body = build_request([{"role": "user", "content": "hi"}], [], "claude-opus-5.5", {"thinking": {"type": "disabled"}})
+    assert list(instance._events(body)) == []
+    assert bodies[1]["additionalModelRequestFields"] == {"thinking": {"type": "adaptive"}, "output_config": {"effort": "low"}}

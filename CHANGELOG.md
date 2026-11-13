@@ -6,7 +6,7 @@ All notable changes to this project are documented here.
 
 ### Added
 
-- Base64 `image_url` / `input_image` parts are forwarded as Kiro image blocks on current, history and tool-result turns; Claude and GPT catalog models declare vision, while other families stay text-only.
+- Base64 `image_url` / `input_image` parts are forwarded as Kiro image blocks on current, history and tool-result turns; Claude and GPT catalog models declare vision, while DeepSeek, MiniMax, GLM and Qwen stay text-only.
 
 ### Fixed
 
@@ -17,6 +17,8 @@ All notable changes to this project are documented here.
 - The compatibility logout helper clears only the Kiro pool, removing a private `hermes_cli` import.
 - Control-plane REST calls use the account region (`q.<region>.amazonaws.com` outside `us-east-1`) instead of a hardcoded `us-east-1` host, and model-discovery fallback is logged.
 - Kiro's schema-invalid `additionalModelRequestFields` 400 is retried without the fields and the model is marked unsupported, instead of failing the request.
+- Non-stream calls made by a synchronous caller on a thread with a running event loop return a real response instead of an unawaited coroutine.
+- Hermes' generic reasoning config is mapped onto Kiro's per-family `additionalModelRequestFields` schema; models that only allow adaptive thinking are retried with adaptive thinking at low effort.
 
 ## [1.0.1] - 2026-09-25
 
