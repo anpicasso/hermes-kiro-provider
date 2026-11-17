@@ -71,7 +71,7 @@ hermes --profile work gateway restart
 hermes auth add kiro
 ```
 
-Choose AWS Builder ID or corporate IAM Identity Center interactively. Provider-specific auth values are requested by the plugin because `hermes auth` intentionally does not add plugin-defined flags.
+Choose AWS Builder ID, corporate IAM Identity Center, Google or GitHub interactively. Google and GitHub show a URL and a code to enter in the browser; the plugin stores and refreshes the tokens in the Hermes credential pool. They use Kiro's undocumented desktop auth endpoints and always sign in to `us-east-1`. Provider-specific auth values are requested by the plugin because `hermes auth` intentionally does not add plugin-defined flags.
 
 Useful native commands:
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import sys
 import asyncio
@@ -18,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "provider"))
 import client
 import credentials
 from credentials import BUILDER_ID_START_URL, KiroAuthError, _next_login_choice, prompt_login_inputs, runtime_region, validate_start_url
+from hermes_cli.auth_constants import AuthError
 from translate import build_request
 
 
@@ -53,10 +55,11 @@ def test_interactive_login_defaults_to_builder_id_or_accepts_custom_idc():
 def test_login_selector_moves_with_arrow_keys_and_fallback_is_spaced():
     assert _next_login_choice(0, "down") == 1
     assert _next_login_choice(1, "up") == 0
+    assert (_next_login_choice(2, "down"), _next_login_choice(3, "down"), _next_login_choice(0, "up")) == (3, 3, 0)
     prompts = []
     values = iter(["", ""])
     prompt_login_inputs(None, None, lambda text: prompts.append(text) or next(values))
-    assert "\n  1. AWS Builder ID\n  2. IAM Identity Center\n\n" in prompts[0]
+    assert "\n  1. AWS Builder ID\n  2. IAM Identity Center\n  3. Google\n  4. GitHub\n\n" in prompts[0]
 
 
 def test_request_hoists_system_and_never_sends_empty_user_content():
@@ -967,3 +970,298 @@ def test_model_without_disabled_thinking_retries_adaptive_low(monkeypatch):
     body = build_request([{"role": "user", "content": "hi"}], [], "claude-opus-5.5", {"thinking": {"type": "disabled"}})
     assert list(instance._events(body)) == []
     assert bodies[1]["additionalModelRequestFields"] == {"thinking": {"type": "adaptive"}, "output_config": {"effort": "low"}}
+
+
+SOCIAL = "https://prod.us-east-1.auth.desktop.kiro.dev"
+ARN = "arn:aws:codewhisperer:us-east-1:000000000000:profile/FAKE"
+GOOGLE = ("social:google", "us-east-1")
+DEVICE = {
+    "deviceCode": "fake-device", "userCode": "FAKE-0000", "verificationUri": "https://kiro.invalid/device",
+    "verificationUriComplete": "https://kiro.invalid/device?user_code=FAKE-0000",
+    "expiresInMilliseconds": 300000, "intervalInMilliseconds": 5000,
+}
+PENDING = {"status": "authorization_pending", "accessToken": None, "refreshToken": None}
+AUTHORIZED = {"status": "authorized", "accessToken": "fake-access", "refreshToken": "fake-refresh", "profileArn": ARN}
+SLOW_DOWN = {"status": "slow_down"}
+
+
+def fake_net(monkeypatch, *replies):
+    """Replace credentials.request_json: record each call, replay replies or raise exceptions."""
+    net = SimpleNamespace(calls=[], replies=list(replies))
+
+    def fake(method, url, *, body=None, headers=None, timeout=30):
+        net.calls.append(SimpleNamespace(method=method, url=url, body=json.loads(body), headers=headers))
+        reply = net.replies.pop(0)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply() if callable(reply) else reply
+
+    monkeypatch.setattr(credentials, "request_json", fake)
+    return net
+
+
+@pytest.fixture
+def env(monkeypatch, tmp_path):
+    """Temp Hermes home with the provider registered, plus a fake credentials.time that records sleeps."""
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    _register_local_profile()
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "profile"))
+    token = set_hermes_home_override(tmp_path / "profile")
+    # credentials.py calls only time.monotonic, time.sleep and time.time, so this
+    # namespace stands in for the whole module; sleeping advances the fake clock.
+    clock = SimpleNamespace(now=0.0, sleeps=[], base=time.time())
+    clock.monotonic, clock.time = lambda: clock.now, lambda: clock.base + clock.now
+    clock.sleep = lambda seconds: (clock.sleeps.append(seconds), setattr(clock, "now", clock.now + seconds))
+    monkeypatch.setattr(credentials, "time", clock)
+    yield clock
+    reset_hermes_home_override(token)
+
+
+def rows():
+    from agent.credential_pool import load_pool
+
+    return load_pool("kiro").entries()
+
+
+def advance(env, seconds, then=PENDING):
+    """Build a fake reply that moves the fake clock forward by `seconds` and then answers `then`."""
+    def reply():
+        env.now += seconds
+        return then
+
+    return reply
+
+
+def social_row(monkeypatch):
+    net = fake_net(monkeypatch, DEVICE, AUTHORIZED)
+    credentials.login(*GOOGLE)
+    return rows()[0], net
+
+
+@pytest.mark.parametrize("choice,start_url", [
+    ("3", "social:google"),
+    ("4", "social:github"),
+    ("0", None),
+    ("5", None),
+    ("x", None),
+])
+def test_menu_choices_3_and_4_pick_social_login(choice, start_url):
+    """Answers 3 and 4 select Google or GitHub without a region prompt; other answers name all four methods."""
+    prompts = []
+    ask = lambda text: prompts.append(text) or choice
+    if start_url:
+        assert prompt_login_inputs(None, None, ask) == (start_url, "us-east-1") and len(prompts) == 1
+    else:
+        with pytest.raises(KiroAuthError) as caught:
+            prompt_login_inputs(None, None, ask)
+        expected = "Choose 1 for AWS Builder ID, 2 for IAM Identity Center, 3 for Google or 4 for GitHub"
+        assert str(caught.value) == expected
+
+
+@pytest.mark.parametrize("choice,wire,label,standalone", [
+    ("3", "Google", "kiro-google", False),
+    ("4", "Github", "kiro-github", False),
+    ("4", "Github", "kiro-github", True),
+])
+def test_social_login_stores_row_for_google_and_github(monkeypatch, capsys, env, choice, wire, label, standalone):
+    """`auth add` and the standalone login post the device-flow requests, print the code and store a social row."""
+    net = fake_net(monkeypatch, DEVICE, PENDING, PENDING, AUTHORIZED)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(choice + "\n"))
+    monkeypatch.setattr(sys, "argv", ["credentials.py", "login"])
+    if standalone:
+        credentials.main()
+    else:
+        assert credentials.auth_handler("add", SimpleNamespace(label=None, priority=None)) is True
+    auth, *polls = net.calls
+    assert (auth.method, auth.url) == ("POST", f"{SOCIAL}/oauth/device/authorization")
+    assert auth.body == {"clientId": "hermes-kiro", "loginProvider": wire}
+    assert auth.headers["Content-Type"] == "application/json"
+    poll = ("POST", f"{SOCIAL}/oauth/device/poll", {"deviceCode": "fake-device", "clientId": "hermes-kiro"})
+    assert [(c.method, c.url, c.body) for c in polls] == [poll] * 3
+    assert env.sleeps == [5.0, 5.0]
+    assert "Open: https://kiro.invalid/device?user_code=FAKE-0000\nCode: FAKE-0000\n" in capsys.readouterr().out
+    (row,) = rows()
+    assert (row.label, row.source, row.access_token, row.refresh_token) == (
+        label, "manual:kiro_social_device_code", "fake-access", "fake-refresh",
+    )
+    assert row.extra == {"kiro_login": "social", "region": "us-east-1", "profile_arn": ARN}
+    assert row.base_url == credentials.RUNTIME_BASE_URL
+    assert row.expires_at_ms == int((env.time() + 3600) * 1000)
+
+
+@pytest.mark.parametrize("status", ["invalid_token", "expired", "denied", "unlisted", "x" * 100])
+def test_unexpected_poll_status_stops_the_login_without_more_polls(monkeypatch, env, status):
+    """Any other poll status ends the login, is named cut to 40 characters, is kept whole as the code."""
+    net = fake_net(monkeypatch, DEVICE, PENDING, {"status": status}, PENDING, AUTHORIZED)
+    with pytest.raises(KiroAuthError) as caught:
+        credentials.login(*GOOGLE)
+    assert f"ended with status {status[:40]!r};" in str(caught.value)
+    assert caught.value.code == status
+    assert len(net.calls) == 3 and env.sleeps == [5.0]
+    assert rows() == []
+
+
+def test_slow_down_lengthens_the_sleep_by_two_seconds_each_time(monkeypatch, env):
+    """Every `slow_down` adds 2 seconds to the interval and polling goes on until `authorized`."""
+    net = fake_net(monkeypatch, DEVICE, PENDING, SLOW_DOWN, SLOW_DOWN, PENDING, AUTHORIZED)
+    credentials.login(*GOOGLE)
+    assert env.sleeps == [5.0, 7.0, 9.0, 9.0]
+    assert len(net.calls) == 6 and len(rows()) == 1
+
+
+@pytest.mark.parametrize("reply", [{}, {"status": None}, {"status": ""}])
+def test_poll_without_a_status_fails_with_its_own_message(monkeypatch, env, reply):
+    """A poll reply with a missing or empty status ends the login with a message that says no status came back."""
+    net = fake_net(monkeypatch, DEVICE, reply, PENDING, AUTHORIZED)
+    with pytest.raises(KiroAuthError, match="returned no status; run `hermes auth add kiro` again") as caught:
+        credentials.login(*GOOGLE)
+    assert caught.value.code == ""
+    assert len(net.calls) == 2 and rows() == []
+
+
+@pytest.mark.parametrize("interval,reply,sleeps", [
+    (5000, PENDING, [5.0, 5.0, 2.0]),
+    (1e9, PENDING, [12.0]),
+    (5000, SLOW_DOWN, [7.0, 5.0]),
+])
+def test_unanswered_login_expires_at_the_server_deadline(monkeypatch, env, interval, reply, sleeps):
+    """An unanswered login ends at the server deadline, with or without `slow_down`, and no sleep passes it."""
+    device = {**DEVICE, "expiresInMilliseconds": 12000, "intervalInMilliseconds": interval}
+    fake_net(monkeypatch, device, *[reply] * 10)
+    with pytest.raises(KiroAuthError, match="expired"):
+        credentials.login(*GOOGLE)
+    assert env.sleeps == sleeps and env.now == 12.0
+
+
+def test_poll_that_uses_up_the_remaining_time_expires_without_sleeping(monkeypatch, env):
+    """A pending poll that ends past the deadline raises the expired error with no further sleep."""
+    fake_net(monkeypatch, {**DEVICE, "expiresInMilliseconds": 10000}, advance(env, 10))
+    with pytest.raises(KiroAuthError, match="expired"):
+        credentials.login(*GOOGLE)
+    assert env.sleeps == []
+
+
+@pytest.mark.parametrize("interval", [0, 200])
+def test_poll_interval_never_drops_below_one_second(monkeypatch, env, interval):
+    """A zero or tiny server interval still sleeps at least one second."""
+    fake_net(monkeypatch, {**DEVICE, "intervalInMilliseconds": interval}, PENDING, AUTHORIZED)
+    credentials.login(*GOOGLE)
+    assert env.sleeps and min(env.sleeps) >= 1.0
+
+
+@pytest.mark.parametrize("missing", ["accessToken", "refreshToken", "profileArn"])
+def test_incomplete_authorization_stores_nothing(monkeypatch, env, missing):
+    """An `authorized` reply without a token or profile ARN raises and persists nothing."""
+    fake_net(monkeypatch, DEVICE, {**AUTHORIZED, missing: None})
+    with pytest.raises(KiroAuthError, match="omitted"):
+        credentials.login(*GOOGLE)
+    assert rows() == []
+
+
+@pytest.mark.parametrize("start_url,replies,match,status,code", [
+    ("social:google", [client.KiroHTTPError(400, b'{"error": "bad_provider"}')], r"failed \(400\)", 400,
+     "bad_provider"),
+    ("social:google", [DEVICE, OSError("no route")], "unreachable", None, ""),
+    ("social:google", [{"userCode": "FAKE-0000"}], "device authorization details", None, ""),
+    ("social:cognito", [], "Unsupported Kiro social login", None, ""),
+])
+def test_login_transport_and_protocol_errors_raise_kiro_auth_error(
+    monkeypatch, env, start_url, replies, match, status, code
+):
+    """HTTP 400, a network failure, a reply without device details and an unknown provider raise KiroAuthError."""
+    fake_net(monkeypatch, *replies)
+    with pytest.raises(KiroAuthError, match=match) as caught:
+        credentials.login(start_url, "us-east-1")
+    assert (caught.value.status, caught.value.code) == (status, code)
+    assert rows() == []
+
+
+def test_login_label_default_trim_and_priority_zero_across_logins(monkeypatch, env):
+    """A blank label gets the default, a padded one is trimmed, priority 0 goes first, each login adds a row."""
+    fake_net(monkeypatch, *[DEVICE, AUTHORIZED] * 3)
+    credentials.login(*GOOGLE, label="   ")
+    credentials.login("social:github", "us-east-1", label="  work ")
+    credentials.login(*GOOGLE, label="last", priority=0)
+    assert [row.label for row in rows()] == ["last", "kiro-google", "work"]
+
+
+@pytest.mark.parametrize("extra,refresh", [
+    ({}, "fake-refresh"),
+    ({"refreshToken": "rotated"}, "rotated"),
+])
+def test_social_refresh_stores_returned_token_and_keeps_metadata(monkeypatch, env, extra, refresh):
+    """A pool refresh posts the refresh token, stores the fresh access token and keeps or rotates the refresh token."""
+    row, net = social_row(monkeypatch)
+    net.replies.append({"accessToken": "fresh-access", "expiresIn": 120, **extra})
+    assert credentials.get_credentials(force_refresh=True).access_token == "fresh-access"
+    (out,) = rows()
+    sent = net.calls[-1]
+    assert (sent.method, sent.url, sent.body) == ("POST", f"{SOCIAL}/refreshToken", {"refreshToken": "fake-refresh"})
+    assert (out.access_token, out.refresh_token, out.extra) == ("fresh-access", refresh, row.extra)
+    assert out.expires_at_ms == int((env.time() + 120) * 1000)
+
+
+@pytest.mark.parametrize("reply,error,relogin", [
+    pytest.param(client.KiroHTTPError(400, b"{}"), AuthError, True, id="http-400"),
+    pytest.param(client.KiroHTTPError(401, b"{}"), AuthError, True, id="http-401"),
+    pytest.param(client.KiroHTTPError(403, b"{}"), AuthError, True, id="http-403"),
+    pytest.param(client.KiroHTTPError(429, b"slow"), KiroAuthError, False, id="http-429"),
+    pytest.param(client.KiroHTTPError(503, b"down"), KiroAuthError, False, id="http-503"),
+    pytest.param(OSError("no route"), KiroAuthError, False, id="network-error"),
+    pytest.param({"expiresIn": 3600}, KiroAuthError, False, id="no-access-token"),
+])
+def test_social_refresh_failures_split_into_relogin_and_retryable(monkeypatch, env, reply, error, relogin):
+    """400, 401 and 403 need a fresh login; 429, 503, a network failure and a missing access token do not."""
+    row, net = social_row(monkeypatch)
+    net.replies.append(reply)
+    with pytest.raises(error) as caught:
+        credentials.refresh_credential(row)
+    assert net.calls[-1].url == f"{SOCIAL}/refreshToken"
+    assert getattr(caught.value, "relogin_required", False) is relogin
+
+
+def test_social_refresh_without_a_refresh_token_asks_for_a_fresh_login(monkeypatch, env):
+    """An empty refresh token raises the relogin error without any request."""
+    row, net = social_row(monkeypatch)
+    row.refresh_token = ""
+    sent = len(net.calls)
+    with pytest.raises(AuthError) as caught:
+        credentials.refresh_credential(row)
+    assert caught.value.relogin_required is True
+    assert len(net.calls) == sent
+
+
+def test_idc_refresh_failure_requires_relogin_and_keeps_the_oidc_error_text(monkeypatch, env):
+    """A rejected IdC refresh asks for a fresh login and its text begins `AWS OIDC token failed (400)`."""
+    expiry = time.time() + 3600
+    row = credentials.persist_credentials(
+        credentials.Credentials("stale", "r", "id", "secret", "us-east-1", BUILDER_ID_START_URL, expiry)
+    )
+    net = fake_net(monkeypatch, client.KiroHTTPError(400, b'{"error": "invalid_grant"}'))
+    with pytest.raises(AuthError) as caught:
+        credentials.refresh_credential(row)
+    assert net.calls[0].url == "https://oidc.us-east-1.amazonaws.com/token"
+    assert caught.value.relogin_required is True
+    assert str(caught.value).startswith("AWS OIDC token failed (400)")
+
+
+@pytest.mark.parametrize("key", ["profile_arn", "region"])
+def test_social_row_missing_metadata_asks_for_a_fresh_login(monkeypatch, env, key):
+    """A social row without profile_arn or region raises the incomplete-metadata error."""
+    row, _ = social_row(monkeypatch)
+    row.extra.pop(key)
+    with pytest.raises(KiroAuthError, match=f"{key}.*hermes auth add kiro"):
+        credentials.refresh_credential(row)
+
+
+def test_social_row_reaches_the_runtime_request_without_profile_discovery(monkeypatch, env):
+    """The client sends the row's profileArn and never calls profile discovery."""
+    social_row(monkeypatch)
+    sent = {}
+    fake_request = lambda method, url, **kwargs: sent.update(url=url, **kwargs) or SimpleNamespace()
+    monkeypatch.setattr(client, "_management", lambda *_: pytest.fail("profile discovery must not run"))
+    monkeypatch.setattr(client, "request", fake_request)
+    client.KiroClient()._open({"conversationState": {}})
+    assert json.loads(sent["body"])["profileArn"] == ARN
+    assert sent["headers"]["Authorization"] == "Bearer fake-access"
