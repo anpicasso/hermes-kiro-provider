@@ -73,6 +73,8 @@ hermes auth add kiro
 
 Choose AWS Builder ID or corporate IAM Identity Center interactively. Provider-specific auth values are requested by the plugin because `hermes auth` intentionally does not add plugin-defined flags.
 
+If you sign in to Kiro with Google or GitHub, run `kiro-cli login` first, then choose **Import Google/GitHub login from kiro-cli**. The plugin reads the token from `~/.local/share/kiro-cli/data.sqlite3` (read-only) and stores it in the Hermes credential pool, where it refreshes independently of `kiro-cli`. Importing the same login into several profiles shares one refresh token, so a rotated token in one profile can invalidate the copy in another. If a refresh is rejected, sign in again with `kiro-cli` and re-import.
+
 Useful native commands:
 
 ```bash

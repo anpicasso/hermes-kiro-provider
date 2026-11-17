@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here.
 
+## [Unreleased]
+
+### Added
+
+- `hermes auth add kiro` offers a third method, "Import Google/GitHub login from kiro-cli", for accounts that sign in to Kiro with Google or GitHub and have no Builder ID or IAM Identity Center login. It reads the token that `kiro-cli` stores (read-only) and saves it as a pooled credential. Social rows refresh through Kiro's own auth endpoint and keep the refresh token when the server does not rotate it; a rejected refresh asks the user to sign in with `kiro-cli` and import again.
+
 ## [1.1.0] - 2026-11-13
 
 ### Added
