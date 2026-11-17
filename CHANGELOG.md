@@ -2,6 +2,19 @@
 
 All notable changes to this project are documented here.
 
+## [1.2.0] - 2026-11-17
+
+### Added
+
+- `hermes auth add kiro` offers Google and GitHub sign-in (menu entries 3 and 4) through Kiro's own device flow at `prod.us-east-1.auth.desktop.kiro.dev`; the plugin polls for authorization, stores the returned profile ARN, and refreshes the access token through `/refreshToken`. A rejected refresh (400/401/403) asks for `hermes auth add kiro` again. A `slow_down` poll reply makes the poll wait 2 seconds longer. Rows are labelled `kiro-google` / `kiro-github` unless `--label` is given.
+
+### Changed
+
+- The status lines (`hermes kiro status` and the standalone `credentials.py status`) print `region=...` where they printed `IdC region=...`.
+- The `hermes kiro login` help text reads "Sign in to Kiro"; it does not name IAM Identity Center alone.
+- The `--start-url` help text also accepts `social:google` / `social:github`, and the `--region` help text says Google and GitHub ignore it.
+- The provider description names all four sign-in methods: AWS Builder ID, IAM Identity Center, Google and GitHub.
+
 ## [1.1.0] - 2026-11-13
 
 ### Added
